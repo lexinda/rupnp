@@ -27,6 +27,7 @@ ssdp-client = "1.0"
 roxmltree = "0.14"
 hyper = { version = "0.14", features = ["client", "http1", "tcp"] }
 bytes = "1.0"
+log = "0.4"
 
 [dev-dependencies]
 tokio = { version = "1.0", features = ["macros", "fs", "rt-multi-thread"] }
