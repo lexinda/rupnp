@@ -4,7 +4,6 @@ use get_if_addrs::{get_if_addrs, Interface};
 use roxmltree::{Attribute, Document, Node};
 #[cfg(feature = "subscribe")]
 use std::net::{IpAddr, SocketAddrV4};
-use log::debug;
 
 pub trait HttpResponseExt: Sized {
     fn err_if_not_200(self) -> Result<Self>;
@@ -12,10 +11,8 @@ pub trait HttpResponseExt: Sized {
 impl HttpResponseExt for hyper::Response<hyper::Body> {
     fn err_if_not_200(self) -> Result<Self> {
         if self.status() != 200 {
-            debug!("Unexpected response [status={}]: {:?}", self.status(), self.body());
             Err(Error::HttpErrorCode(self.status()))
         } else {
-            debug!("Correct response [status={}]: {:?}", self.status(), self.body());
             Ok(self)
         }
     }

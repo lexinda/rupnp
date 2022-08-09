@@ -10,6 +10,7 @@ use crate::{
 use futures_core::stream::Stream;
 #[cfg(feature = "subscribe")]
 use genawaiter::sync::{Co, Gen};
+use log::debug;
 #[cfg(feature = "subscribe")]
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
@@ -136,11 +137,11 @@ impl Service {
         let doc = hyper::Client::new()
             .request(request)
             .await?
-            .err_if_not_200()?
             .into_body()
             .text()
             .await?;
         let doc = std::str::from_utf8(&doc)?;
+        debug!("Action server response: {}", doc);
 
         let document = Document::parse(&doc)?;
         let response = utils::find_root(&document, "Body", "UPnP Response")?
