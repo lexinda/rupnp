@@ -128,8 +128,10 @@ impl Service {
         );
 
         let soap_action = format!("\"{}#{}\"", &self.service_type, action);
-
-        let request = Request::post(self.control_url(url))
+        let control_url = self.control_url(url);
+        let control_url_str = control_url.scheme().unwrap().to_string()+"://"+control_url.authority().unwrap().as_str()+"/"+control_url.path_and_query().unwrap().as_str();
+        
+        let request = Request::post(control_url_str)
             .header("CONTENT-TYPE", "text/xml; charset=\"utf-8\"")
             .header("SOAPAction", soap_action)
             .body(body.into())
