@@ -129,46 +129,66 @@ impl Service {
 
         let soap_action = format!("\"{}#{}\"", &self.service_type, action);
         let control_url = self.control_url(url);
-        let control_url_str = control_url.scheme().unwrap().to_string()+"://"+control_url.authority().unwrap().as_str()+"/"+control_url.path_and_query().unwrap().as_str();
-        
-        let request = Request::post(control_url_str)
-            .header("CONTENT-TYPE", "text/xml; charset=\"utf-8\"")
-            .header("SOAPAction", soap_action)
-            .body(body.into())
-            .expect("infallible");
-        let doc = hyper::Client::new()
-            .request(request)
-            .await?
-            .into_body()
-            .text()
-            .await?;
-        let doc = std::str::from_utf8(&doc)?;
-        debug!("Action server response: {}", doc);
+        let control_url_str = panic::catch_unwind(||{
+            let cPath = control_url.path_and_query().unwrap();
+            if(cPath.as_str().starts_with("/")){
+                control_url.scheme().unwrap().to_string()+"://"+control_url.authority().unwrap().as_str()+control_url.path_and_query().unwrap().as_str()
+            }else{
+                control_url.scheme().unwrap().to_string()+"://"+control_url.authority().unwrap().as_str()+"/"+control_url.path_and_query().unwrap().as_str()
+            }
 
-        let document = Document::parse(&doc)?;
-        let response = utils::find_root(&document, "Body", "UPnP Response")?
-            .first_element_child()
-            .ok_or_else(|| {
-                Error::XmlMissingElement("Body".to_string(), format!("{}Response", action))
-            })?;
+        });
+        match control_url_str{
+            Ok(cus)=>{
+                let request = Request::post(cus)
+                    .header("CONTENT-TYPE", "text/xml; charset=\"utf-8\"")
+                    .header("SOAPAction", soap_action)
+                    .body(body.into());
+                match request {
+                    Ok(req)=>{
+                        let doc = hyper::Client::new()
+                            .request(req)
+                            .await?
+                            .into_body()
+                            .text()
+                            .await?;
+                        let doc = std::str::from_utf8(&doc)?;
+                        debug!("Action server response: {}", doc);
 
-        if response.tag_name().name().eq_ignore_ascii_case("Fault") {
-            return Err(UPnPError::from_fault_node(response)?.into());
-        }
+                        let document = Document::parse(&doc)?;
+                        let response = utils::find_root(&document, "Body", "UPnP Response")?
+                            .first_element_child()
+                            .ok_or_else(|| {
+                                Error::XmlMissingElement("Body".to_string(), format!("{}Response", action))
+                            })?;
 
-        let values: HashMap<_, _> = response
-            .children()
-            .filter(Node::is_element)
-            .filter_map(|node| -> Option<(String, String)> {
-                if let Some(text) = node.text() {
-                    Some((node.tag_name().name().to_string(), text.to_string()))
-                } else {
-                    None
+                        if response.tag_name().name().eq_ignore_ascii_case("Fault") {
+                            return Err(UPnPError::from_fault_node(response)?.into());
+                        }
+
+                        let values: HashMap<_, _> = response
+                            .children()
+                            .filter(Node::is_element)
+                            .filter_map(|node| -> Option<(String, String)> {
+                                if let Some(text) = node.text() {
+                                    Some((node.tag_name().name().to_string(), text.to_string()))
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+
+                        Ok(values)
+                    },
+                    Err(e)=>{
+                        Ok(HashMap::new())
+                    }
                 }
-            })
-            .collect();
-
-        Ok(values)
+            },
+            Err(e)=>{
+                Ok(HashMap::new())
+            }
+        }
     }
 
     #[cfg(feature = "subscribe")]
