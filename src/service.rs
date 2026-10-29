@@ -20,7 +20,7 @@ use tokio::{
     net::TcpListener,
 };
 
-use http::{uri::PathAndQuery, Request, Uri};
+use http::{Request, Uri};
 use roxmltree::{Document, Node};
 use ssdp_client::URN;
 
@@ -37,13 +37,14 @@ use utils::HyperBodyExt;
 pub struct Service {
     service_type: URN,
     service_id: String,
-    scpd_endpoint: PathAndQuery,
-    control_endpoint: PathAndQuery,
-    event_sub_endpoint: Option<PathAndQuery>,
+    scpd_endpoint: String,
+    control_endpoint: String,
+    event_sub_endpoint: Option<String>,
+    url_base: Option<String>,
 }
 
 impl Service {
-    pub(crate) fn from_xml(node: Node<'_, '_>) -> Result<Self> {
+    pub(crate) fn from_xml(node: Node<'_, '_>, url_base: Option<String>) -> Result<Self> {
         #[allow(non_snake_case)]
         let (service_type, service_id, scpd_endpoint, control_endpoint, event_sub_endpoint) =
             find_in_xml! { node => serviceType, serviceId, SCPDURL, controlURL, ?eventSubURL };
@@ -51,9 +52,10 @@ impl Service {
         Ok(Self {
             service_type: utils::parse_node_text(service_type)?,
             service_id: utils::parse_node_text(service_id)?,
-            scpd_endpoint: utils::parse_url_endpoint(scpd_endpoint)?,
-            control_endpoint: utils::parse_url_endpoint(control_endpoint)?,
-            event_sub_endpoint: utils::parse_optional_url_endpoint(event_sub_endpoint)?,
+            scpd_endpoint: utils::parse_endpoint(scpd_endpoint)?,
+            control_endpoint: utils::parse_endpoint(control_endpoint)?,
+            event_sub_endpoint: utils::parse_optional_endpoint(event_sub_endpoint)?,
+            url_base,
         })
     }
 
@@ -67,16 +69,30 @@ impl Service {
         &self.service_id
     }
 
-    pub(crate) fn control_url(&self, url: &Uri) -> Uri {
-        replace_url_path(url, &self.control_endpoint)
+    /// Returns the base url the relative urls of this service are resolved against.
+    ///
+    /// It is the url of the device description without its last path segment, unless the
+    /// device defines a `URLBase`.
+    fn base_url(&self, url: &Uri) -> Result<Uri> {
+        let document_base = utils::base_url(url);
+
+        match &self.url_base {
+            Some(url_base) => utils::resolve_url(&document_base, url_base),
+            None => Ok(document_base),
+        }
     }
-    pub(crate) fn scpd_url(&self, url: &Uri) -> Uri {
-        replace_url_path(url, &self.scpd_endpoint)
+
+    pub(crate) fn control_url(&self, url: &Uri) -> Result<Uri> {
+        utils::resolve_url(&self.base_url(url)?, &self.control_endpoint)
     }
-    pub(crate) fn event_sub_url(&self, url: &Uri) -> Option<Uri> {
-        self.event_sub_endpoint
-            .as_ref()
-            .map(|path| replace_url_path(url, path))
+    pub(crate) fn scpd_url(&self, url: &Uri) -> Result<Uri> {
+        utils::resolve_url(&self.base_url(url)?, &self.scpd_endpoint)
+    }
+    pub(crate) fn event_sub_url(&self, url: &Uri) -> Result<Option<Uri>> {
+        match &self.event_sub_endpoint {
+            Some(endpoint) => Ok(Some(utils::resolve_url(&self.base_url(url)?, endpoint)?)),
+            None => Ok(None),
+        }
     }
 
     /// Returns whether this service provides an `eventSubURL`.
@@ -92,7 +108,7 @@ impl Service {
     /// Fetches the [`SCPD`](scpd/struct.SCPD.html) of this service.
     pub async fn scpd(&self, url: &Uri) -> Result<SCPD> {
         SCPD::from_url(
-            &self.scpd_url(url),
+            &self.scpd_url(url)?,
             self.service_type().clone(),
             crate::DEFAULT_TIMEOUT,
         )
@@ -102,7 +118,7 @@ impl Service {
     /// Fetches the [`SCPD`](scpd/struct.SCPD.html) of this service, giving up after
     /// `timeout`.
     pub async fn scpd_with_timeout(&self, url: &Uri, timeout: Duration) -> Result<SCPD> {
-        SCPD::from_url(&self.scpd_url(url), self.service_type().clone(), timeout).await
+        SCPD::from_url(&self.scpd_url(url)?, self.service_type().clone(), timeout).await
     }
 
     /// Execute some UPnP Action on this service.
@@ -232,7 +248,7 @@ impl Service {
 
         let soap_action = format!("\"{}#{}\"", self.service_type, action);
 
-        let request = Request::post(self.control_url(url))
+        let request = Request::post(self.control_url(url)?)
             .header("CONTENT-TYPE", "text/xml; charset=\"utf-8\"")
             .header("SOAPAction", soap_action)
             .body(Full::new(Bytes::from(body)))
@@ -282,7 +298,7 @@ impl Service {
         timeout_secs: u32,
     ) -> Result<String> {
         let event_sub_url = self
-            .event_sub_url(url)
+            .event_sub_url(url)?
             .ok_or(Error::EventSubscriptionNotSupported)?;
 
         let req = Request::builder()
@@ -401,7 +417,7 @@ impl Service {
     /// When the sid is invalid, the control point will respond with a `412 Preconditition failed`.
     pub async fn renew_subscription(&self, url: &Uri, sid: &str, timeout_secs: u32) -> Result<()> {
         let event_sub_url = self
-            .event_sub_url(url)
+            .event_sub_url(url)?
             .ok_or(Error::EventSubscriptionNotSupported)?;
 
         let req = Request::builder()
@@ -430,7 +446,7 @@ impl Service {
     /// When the sid is invalid, the control point will respond with a `412 Preconditition failed`.
     pub async fn unsubscribe(&self, url: &Uri, sid: &str) -> Result<()> {
         let event_sub_url = self
-            .event_sub_url(url)
+            .event_sub_url(url)?
             .ok_or(Error::EventSubscriptionNotSupported)?;
 
         let req = Request::builder()
@@ -512,12 +528,6 @@ async fn subscribe_stream(listener: TcpListener, co: Co<Result<HashMap<String, S
     }
 }
 
-fn replace_url_path(url: &Uri, path: &PathAndQuery) -> Uri {
-    let mut parts = url.clone().into_parts();
-    parts.path_and_query = Some(path.clone());
-    Uri::from_parts(parts).expect("infallible")
-}
-
 /// Formats a socket address as the callback url the device has to call.
 #[cfg(feature = "subscribe")]
 fn format_callback_addr(addr: &SocketAddr) -> String {
@@ -557,7 +567,7 @@ mod tests {
 
     fn service_from_xml(xml: &str) -> Result<Service, Box<dyn std::error::Error>> {
         let doc = Document::parse(xml)?;
-        Ok(Service::from_xml(doc.root_element())?)
+        Ok(Service::from_xml(doc.root_element(), None)?)
     }
 
     #[test]
@@ -574,7 +584,7 @@ mod tests {
         )?;
 
         assert!(!service.supports_events());
-        assert_eq!(service.event_sub_url(&Uri::from_static(DEVICE_URL)), None);
+        assert_eq!(service.event_sub_url(&Uri::from_static(DEVICE_URL))?, None);
 
         Ok(())
     }
@@ -596,7 +606,7 @@ mod tests {
         assert!(service.supports_events());
         assert_eq!(
             service
-                .event_sub_url(&Uri::from_static(DEVICE_URL))
+                .event_sub_url(&Uri::from_static(DEVICE_URL))?
                 .map(|url| url.to_string()),
             Some("http://192.168.1.5:1400/MediaRenderer/RenderingControl/Event".to_string())
         );
@@ -605,7 +615,8 @@ mod tests {
     }
 
     #[test]
-    fn service_with_relative_endpoints_is_parsed() -> Result<(), Box<dyn std::error::Error>> {
+    fn relative_endpoints_are_resolved_against_the_base_url(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let service = service_from_xml(
             r#"
             <service>
@@ -618,12 +629,70 @@ mod tests {
             "#,
         )?;
 
-        assert!(service.supports_events());
+        let url = Uri::from_static(DEVICE_URL);
+
+        assert_eq!(
+            service.control_url(&url)?.to_string(),
+            "http://192.168.1.5:1400/xml/MediaRenderer/RenderingControl/control"
+        );
+        assert_eq!(
+            service.scpd_url(&url)?.to_string(),
+            "http://192.168.1.5:1400/xml/MediaRenderer/RenderingControl/Description.xml"
+        );
+        assert_eq!(
+            service.event_sub_url(&url)?.map(|url| url.to_string()),
+            Some("http://192.168.1.5:1400/xml/MediaRenderer/RenderingControl/Event".to_string())
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn root_relative_endpoints_keep_the_authority() -> Result<(), Box<dyn std::error::Error>> {
+        let service = service_from_xml(
+            r#"
+            <service>
+                <serviceType>urn:schemas-upnp-org:service:RenderingControl:1</serviceType>
+                <serviceId>urn:upnp-org:serviceId:RenderingControl</serviceId>
+                <SCPDURL>/MediaRenderer/RenderingControl/Description.xml</SCPDURL>
+                <controlURL>/MediaRenderer/RenderingControl/control</controlURL>
+            </service>
+            "#,
+        )?;
+
         assert_eq!(
             service
-                .control_url(&Uri::from_static(DEVICE_URL))
+                .control_url(&Uri::from_static(DEVICE_URL))?
                 .to_string(),
             "http://192.168.1.5:1400/MediaRenderer/RenderingControl/control"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn url_base_overrides_the_base_of_the_document() -> Result<(), Box<dyn std::error::Error>> {
+        let doc = Document::parse(
+            r#"
+            <service>
+                <serviceType>urn:schemas-upnp-org:service:RenderingControl:1</serviceType>
+                <serviceId>urn:upnp-org:serviceId:RenderingControl</serviceId>
+                <SCPDURL>Description.xml</SCPDURL>
+                <controlURL>control</controlURL>
+            </service>
+            "#,
+        )?;
+
+        let service = Service::from_xml(
+            doc.root_element(),
+            Some("http://192.168.1.9:1400/base/".to_string()),
+        )?;
+
+        assert_eq!(
+            service
+                .control_url(&Uri::from_static(DEVICE_URL))?
+                .to_string(),
+            "http://192.168.1.9:1400/base/control"
         );
 
         Ok(())

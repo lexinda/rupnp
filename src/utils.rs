@@ -1,10 +1,9 @@
 use crate::{Error, Result};
-use http::uri::PathAndQuery;
+use http::Uri;
 use http_body_util::BodyExt;
 #[cfg(feature = "subscribe")]
 use if_addrs::{get_if_addrs, IfAddr};
 use roxmltree::{Document, Node};
-use std::borrow::Cow;
 #[cfg(feature = "subscribe")]
 use std::net::{IpAddr, SocketAddrV4};
 use std::time::Duration;
@@ -90,32 +89,196 @@ where
         .map_err(Error::invalid_response)
 }
 
-/// Parses a URL endpoint of a service (e.g. `controlURL`) into a [`PathAndQuery`].
+/// Returns the text of an element, trimmed.
+pub fn node_text(node: Node<'_, '_>) -> String {
+    node.text().unwrap_or_default().trim().to_string()
+}
+
+/// Returns the first child element with the given name.
+pub fn find_child<'a, 'input: 'a>(node: Node<'a, 'input>, name: &str) -> Option<Node<'a, 'input>> {
+    node.children()
+        .filter(Node::is_element)
+        .find(|child| child.tag_name().name().eq_ignore_ascii_case(name))
+}
+
+/// Parses a URL endpoint of a service (e.g. `controlURL`) into a url reference.
 ///
-/// Some devices emit endpoints relative to the device description but without a leading
-/// slash (e.g. `MediaRenderer/control`). [`PathAndQuery`] rejects such paths, so they are
-/// normalized to an absolute path here.
-pub fn parse_url_endpoint(node: Node<'_, '_>) -> Result<PathAndQuery> {
-    let text = node.text().unwrap_or_default().trim();
+/// The reference is not resolved here, it is resolved against the base url of the device
+/// description when it is used.
+pub fn parse_endpoint(node: Node<'_, '_>) -> Result<String> {
+    let reference = node_text(node);
 
-    if text.is_empty() {
-        return Err(Error::ParseError("empty url endpoint"));
-    }
+    validate_reference(&reference)?;
 
-    let normalized = if text.starts_with('/') {
-        Cow::Borrowed(text)
-    } else {
-        Cow::Owned(format!("/{text}"))
-    };
-
-    normalized.parse().map_err(Error::invalid_response)
+    Ok(reference)
 }
 
 /// Parses an optional URL endpoint of a service (e.g. `eventSubURL`).
 ///
 /// Returns `Ok(None)` if the element is not present in the device description.
-pub fn parse_optional_url_endpoint(node: Option<Node<'_, '_>>) -> Result<Option<PathAndQuery>> {
-    node.map(parse_url_endpoint).transpose()
+pub fn parse_optional_endpoint(node: Option<Node<'_, '_>>) -> Result<Option<String>> {
+    node.map(parse_endpoint).transpose()
+}
+
+/// Checks that a string is a usable url reference.
+fn validate_reference(reference: &str) -> Result<()> {
+    if reference.is_empty() {
+        return Err(Error::ParseError("empty url endpoint"));
+    }
+
+    if reference
+        .chars()
+        .any(|c| c.is_whitespace() || c.is_control())
+    {
+        return Err(Error::ParseError(
+            "url endpoint contains invalid characters",
+        ));
+    }
+
+    if has_scheme(reference) {
+        reference.parse::<Uri>().map_err(Error::invalid_response)?;
+    }
+
+    Ok(())
+}
+
+/// Returns the base url of the document at the given url.
+///
+/// The base url is the url of the document without its last path segment, so
+/// `http://host:1400/xml/device_description.xml` has the base url
+/// `http://host:1400/xml/`.
+pub fn base_url(url: &Uri) -> Uri {
+    let path = url.path();
+
+    let dir = match path.rfind('/') {
+        Some(idx) => &path[..=idx],
+        None => "/",
+    };
+
+    let mut parts = url.clone().into_parts();
+    parts.path_and_query = Some(dir.parse().expect("infallible"));
+
+    Uri::from_parts(parts).expect("infallible")
+}
+
+/// Resolves a url reference against a base url.
+///
+/// The resolution follows RFC 3986:
+///
+/// * a reference with a scheme is used as it is
+/// * a root relative reference (`/foo`) keeps the scheme and authority of the base url
+/// * a relative reference (`foo`) is resolved against the path of the base url
+///
+/// Dot segments (`..` and `.`) are removed from the result.
+pub fn resolve_url(base: &Uri, reference: &str) -> Result<Uri> {
+    let reference = reference.trim();
+
+    if reference.is_empty() {
+        return Err(Error::ParseError("empty url"));
+    }
+
+    if has_scheme(reference) {
+        return reference.parse().map_err(Error::invalid_response);
+    }
+
+    // The fragment is not part of the request, so it is dropped.
+    let reference = reference.split('#').next().unwrap_or_default();
+
+    let (path, query) = match reference.split_once('?') {
+        Some((path, query)) => (path, Some(query)),
+        None => (reference, None),
+    };
+
+    let base_path = base.path();
+
+    let merged = if path.is_empty() {
+        base_path.to_string()
+    } else if path.starts_with('/') {
+        path.to_string()
+    } else {
+        // The base path up to and including its last slash.
+        let dir = match base_path.rfind('/') {
+            Some(idx) => &base_path[..=idx],
+            None => "/",
+        };
+
+        format!("{dir}{path}")
+    };
+
+    let merged = remove_dot_segments(&merged);
+
+    let mut path_and_query = merged;
+    if let Some(query) = query {
+        path_and_query.push('?');
+        path_and_query.push_str(query);
+    }
+
+    let mut parts = base.clone().into_parts();
+    parts.path_and_query = Some(path_and_query.parse().map_err(Error::invalid_response)?);
+
+    Uri::from_parts(parts).map_err(Error::invalid_response)
+}
+
+/// Returns whether a url reference has a scheme.
+fn has_scheme(reference: &str) -> bool {
+    let Some((scheme, _)) = reference.split_once(':') else {
+        return false;
+    };
+
+    let mut chars = scheme.chars();
+
+    match chars.next() {
+        Some(first) if first.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.')
+}
+
+/// Removes the dot segments of a path, as described in RFC 3986.
+fn remove_dot_segments(path: &str) -> String {
+    let mut input = path.to_string();
+    let mut output = String::new();
+
+    while !input.is_empty() {
+        if let Some(rest) = input.strip_prefix("../") {
+            input = rest.to_string();
+        } else if let Some(rest) = input.strip_prefix("./") {
+            input = rest.to_string();
+        } else if input.starts_with("/./") {
+            input.replace_range(..3, "/");
+        } else if input == "/." {
+            input = "/".to_string();
+        } else if input.starts_with("/../") {
+            input.replace_range(..4, "/");
+            remove_last_segment(&mut output);
+        } else if input == "/.." {
+            input = "/".to_string();
+            remove_last_segment(&mut output);
+        } else if input == "." || input == ".." {
+            input.clear();
+        } else {
+            // Move the first path segment to the output.
+            let start = usize::from(input.starts_with('/'));
+            let end = match input[start..].find('/') {
+                Some(idx) => start + idx,
+                None => input.len(),
+            };
+
+            output.push_str(&input[..end]);
+            input.drain(..end);
+        }
+    }
+
+    output
+}
+
+/// Removes the last segment of a path.
+fn remove_last_segment(path: &mut String) {
+    match path.rfind('/') {
+        Some(idx) => path.truncate(idx),
+        None => path.clear(),
+    }
 }
 
 pub fn find_root<'a, 'input: 'a>(
@@ -265,7 +428,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crate::utils::parse_url_endpoint;
+    use crate::utils::{base_url, parse_endpoint, resolve_url};
+    use http::Uri;
     use roxmltree::Document;
     use std::collections::HashMap;
     use std::time::Duration;
@@ -330,7 +494,101 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_url_endpoint() -> Result<(), Box<dyn std::error::Error>> {
+    fn base_url_is_the_url_without_its_last_segment() {
+        let url: Uri = "http://192.168.1.5:1400/xml/device_description.xml"
+            .parse()
+            .unwrap();
+        assert_eq!(base_url(&url).to_string(), "http://192.168.1.5:1400/xml/");
+
+        let url: Uri = "http://192.168.1.5:1400/device_description.xml"
+            .parse()
+            .unwrap();
+        assert_eq!(base_url(&url).to_string(), "http://192.168.1.5:1400/");
+
+        let url: Uri = "http://192.168.1.5:1400".parse().unwrap();
+        assert_eq!(base_url(&url).to_string(), "http://192.168.1.5:1400/");
+    }
+
+    #[test]
+    fn relative_urls_are_resolved_against_the_base() {
+        let base: Uri = "http://192.168.1.5:1400/xml/".parse().unwrap();
+
+        assert_eq!(
+            resolve_url(&base, "MediaRenderer/control")
+                .unwrap()
+                .to_string(),
+            "http://192.168.1.5:1400/xml/MediaRenderer/control"
+        );
+        assert_eq!(
+            resolve_url(&base, "./MediaRenderer/control")
+                .unwrap()
+                .to_string(),
+            "http://192.168.1.5:1400/xml/MediaRenderer/control"
+        );
+    }
+
+    #[test]
+    fn root_relative_urls_keep_the_authority_of_the_base() {
+        let base: Uri = "http://192.168.1.5:1400/xml/".parse().unwrap();
+
+        assert_eq!(
+            resolve_url(&base, "/MediaRenderer/control")
+                .unwrap()
+                .to_string(),
+            "http://192.168.1.5:1400/MediaRenderer/control"
+        );
+    }
+
+    #[test]
+    fn absolute_urls_are_used_as_they_are() {
+        let base: Uri = "http://192.168.1.5:1400/xml/".parse().unwrap();
+
+        assert_eq!(
+            resolve_url(&base, "http://192.168.1.9:1400/control")
+                .unwrap()
+                .to_string(),
+            "http://192.168.1.9:1400/control"
+        );
+    }
+
+    #[test]
+    fn dot_segments_are_removed() {
+        let base: Uri = "http://192.168.1.5:1400/xml/".parse().unwrap();
+
+        assert_eq!(
+            resolve_url(&base, "../control").unwrap().to_string(),
+            "http://192.168.1.5:1400/control"
+        );
+        assert_eq!(
+            resolve_url(&base, "a/../control").unwrap().to_string(),
+            "http://192.168.1.5:1400/xml/control"
+        );
+        assert_eq!(
+            resolve_url(&base, "./a/./b").unwrap().to_string(),
+            "http://192.168.1.5:1400/xml/a/b"
+        );
+    }
+
+    #[test]
+    fn query_strings_are_kept() {
+        let base: Uri = "http://192.168.1.5:1400/xml/".parse().unwrap();
+
+        assert_eq!(
+            resolve_url(&base, "control?id=1").unwrap().to_string(),
+            "http://192.168.1.5:1400/xml/control?id=1"
+        );
+    }
+
+    #[test]
+    fn empty_references_are_rejected() {
+        let base: Uri = "http://192.168.1.5:1400/xml/".parse().unwrap();
+
+        assert!(resolve_url(&base, "").is_err());
+        assert!(resolve_url(&base, "   ").is_err());
+    }
+
+    #[test]
+    fn endpoints_are_validated() -> Result<(), Box<dyn std::error::Error>> {
         let xml = r#"
         <service>
             <controlURL>/MediaRenderer/control</controlURL>
@@ -343,19 +601,16 @@ mod tests {
         #[allow(non_snake_case)]
         let control_url = find_in_xml! { service_node => controlURL };
 
-        assert_eq!(
-            parse_url_endpoint(control_url)?.as_str(),
-            "/MediaRenderer/control"
-        );
+        assert_eq!(parse_endpoint(control_url)?, "/MediaRenderer/control");
 
         Ok(())
     }
 
     #[test]
-    fn test_parse_url_endpoint_without_leading_slash() -> Result<(), Box<dyn std::error::Error>> {
+    fn endpoints_with_invalid_characters_are_rejected() -> Result<(), Box<dyn std::error::Error>> {
         let xml = r#"
         <service>
-            <controlURL>MediaRenderer/control</controlURL>
+            <controlURL>Media Renderer/control</controlURL>
         </service>
         "#;
 
@@ -365,10 +620,7 @@ mod tests {
         #[allow(non_snake_case)]
         let control_url = find_in_xml! { service_node => controlURL };
 
-        assert_eq!(
-            parse_url_endpoint(control_url)?.as_str(),
-            "/MediaRenderer/control"
-        );
+        assert!(parse_endpoint(control_url).is_err());
 
         Ok(())
     }

@@ -4,6 +4,7 @@ use crate::{
     Result, Service,
 };
 use http::Uri;
+use log::warn;
 use roxmltree::{Document, Node};
 use ssdp_client::URN;
 use std::collections::HashMap;
@@ -66,7 +67,12 @@ impl Device {
 
         let document = Document::parse(body)?;
         let device = utils::find_root(&document, "device", "Device Description")?;
-        let device_spec = DeviceSpec::from_xml(device, extra_keys)?;
+
+        // The relative urls of the description are resolved against the url of the
+        // document, unless the root device defines a `URLBase`.
+        let url_base = utils::find_child(device, "URLBase").map(utils::node_text);
+
+        let device_spec = DeviceSpec::from_xml(device, extra_keys, url_base)?;
 
         Ok(Self { url, device_spec })
     }
@@ -130,7 +136,11 @@ pub struct DeviceSpec {
 }
 
 impl DeviceSpec {
-    fn from_xml<'a, 'input: 'a>(node: Node<'a, 'input>, extra_keys: &[&str]) -> Result<Self> {
+    fn from_xml<'a, 'input: 'a>(
+        node: Node<'a, 'input>,
+        extra_keys: &[&str],
+        url_base: Option<String>,
+    ) -> Result<Self> {
         #[rustfmt::skip]
         #[allow(non_snake_case)]
         let (device_type, friendly_name, services, devices, extra_properties) =
@@ -170,7 +180,7 @@ impl DeviceSpec {
             Some(d) => d
                 .children()
                 .filter(Node::is_element)
-                .map(|node| DeviceSpec::from_xml(node, extra_keys))
+                .map(|node| DeviceSpec::from_xml(node, extra_keys, url_base.clone()))
                 .collect::<Result<_>>()?,
             None => Vec::new(),
         };
@@ -178,8 +188,16 @@ impl DeviceSpec {
             Some(s) => s
                 .children()
                 .filter(Node::is_element)
-                .map(Service::from_xml)
-                .collect::<Result<_>>()?,
+                // A service with a malformed description is skipped, so that a single
+                // broken service does not make the whole device unusable.
+                .filter_map(|node| match Service::from_xml(node, url_base.clone()) {
+                    Ok(service) => Some(service),
+                    Err(err) => {
+                        warn!("skipping service with an invalid description: {err}");
+                        None
+                    }
+                })
+                .collect(),
             None => Vec::new(),
         };
 
@@ -299,5 +317,49 @@ impl DeviceSpec {
     }
     pub fn find_device(&self, device_type: &URN) -> Option<&DeviceSpec> {
         self.devices_iter().find(|d| &d.device_type == device_type)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_broken_service_does_not_break_the_whole_device() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let xml = r#"
+        <device>
+            <deviceType>urn:schemas-upnp-org:device:MediaRenderer:1</deviceType>
+            <friendlyName>My Renderer</friendlyName>
+            <manufacturer>ACME Corp</manufacturer>
+            <modelName>Renderer 1000</modelName>
+            <UDN>uuid:1234</UDN>
+            <serviceList>
+                <service>
+                    <serviceType>urn:schemas-upnp-org:service:Broken:1</serviceType>
+                    <serviceId>urn:upnp-org:serviceId:Broken</serviceId>
+                    <SCPDURL>/broken</SCPDURL>
+                    <controlURL>broken control</controlURL>
+                </service>
+                <service>
+                    <serviceType>urn:schemas-upnp-org:service:RenderingControl:1</serviceType>
+                    <serviceId>urn:upnp-org:serviceId:RenderingControl</serviceId>
+                    <SCPDURL>/MediaRenderer/RenderingControl/Description.xml</SCPDURL>
+                    <controlURL>/MediaRenderer/RenderingControl/control</controlURL>
+                </service>
+            </serviceList>
+        </device>
+        "#;
+
+        let doc = Document::parse(xml)?;
+        let spec = DeviceSpec::from_xml(doc.root_element(), &[], None)?;
+
+        // The broken service is skipped, the working one is still there.
+        assert_eq!(spec.services().len(), 1);
+        assert!(spec
+            .find_service(&URN::service("schemas-upnp-org", "RenderingControl", 1))
+            .is_some());
+
+        Ok(())
     }
 }
