@@ -12,6 +12,7 @@ use ssdp_client::URN;
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::hash::Hasher;
+use std::time::Duration;
 
 #[derive(Debug, Clone)]
 /// A UPnP Device.
@@ -30,24 +31,41 @@ impl Device {
     /// The url should point to the `/device_description.xml` or similar of the device.
     /// If you dont know the concrete location, use [`discover`](fn.discover.html) instead.
     pub async fn from_url(url: Uri) -> Result<Self> {
-        Self::from_url_and_properties(url, &[]).await
+        Self::from_url_with_timeout(url, crate::DEFAULT_TIMEOUT).await
+    }
+
+    /// Creates a UPnP device from the given url, giving up after `timeout`.
+    ///
+    /// This behaves like [`from_url`](Device::from_url), but the request is aborted when the
+    /// device does not respond within `timeout`.
+    pub async fn from_url_with_timeout(url: Uri, timeout: Duration) -> Result<Self> {
+        Self::from_url_and_properties_with_timeout(url, &[], timeout).await
     }
 
     /// Creates a UPnP device from the given url, defining extra device properties
     /// to be accessed with `get_extra_property`.
     pub async fn from_url_and_properties(url: Uri, extra_keys: &[&str]) -> Result<Self> {
-        let body = hyper_util::client::legacy::Client::builder(TokioExecutor::new())
-            .build_http::<Empty<Bytes>>()
-            .get(url.clone())
-            .await?
-            .err_if_not_200()?
-            .into_body()
-            .bytes()
-            .await?;
+        Self::from_url_and_properties_with_timeout(url, extra_keys, crate::DEFAULT_TIMEOUT).await
+    }
 
-        // .into_body()
-        // .text()
-        // .await?;
+    /// Creates a UPnP device from the given url, defining extra device properties
+    /// to be accessed with `get_extra_property`, giving up after `timeout`.
+    pub async fn from_url_and_properties_with_timeout(
+        url: Uri,
+        extra_keys: &[&str],
+        timeout: Duration,
+    ) -> Result<Self> {
+        let body = utils::with_timeout(timeout, async {
+            let response = hyper_util::client::legacy::Client::builder(TokioExecutor::new())
+                .build_http::<Empty<Bytes>>()
+                .get(url.clone())
+                .await?
+                .err_if_not_200()?;
+
+            response.into_body().bytes().await
+        })
+        .await?;
+
         let body = std::str::from_utf8(&body)?;
 
         let document = Document::parse(body)?;

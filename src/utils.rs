@@ -2,11 +2,12 @@ use crate::{Error, Result};
 use http::uri::PathAndQuery;
 use http_body_util::BodyExt;
 #[cfg(feature = "subscribe")]
-use if_addrs::{get_if_addrs, Interface};
+use if_addrs::{get_if_addrs, IfAddr};
 use roxmltree::{Document, Node};
 use std::borrow::Cow;
 #[cfg(feature = "subscribe")]
 use std::net::{IpAddr, SocketAddrV4};
+use std::time::Duration;
 
 pub(crate) trait HttpResponseExt: Sized {
     fn err_if_not_200(self) -> Result<Self>;
@@ -136,17 +137,130 @@ pub fn find_node_attribute<'n, 'd: 'n>(node: Node<'d, 'n>, attr: &str) -> Option
 }
 
 #[cfg(feature = "subscribe")]
-pub fn get_local_addr() -> Result<SocketAddrV4> {
-    get_if_addrs()?
+/// Returns the local addresses that can be used to reach devices on the local network.
+///
+/// Loopback addresses are skipped.
+pub fn get_local_addrs() -> Result<Vec<IpAddr>> {
+    Ok(local_ifaces()?.into_iter().map(|(ip, _)| ip).collect())
+}
+
+/// Returns the local addresses together with the netmask of the interface they belong to.
+#[cfg(feature = "subscribe")]
+fn local_ifaces() -> Result<Vec<(IpAddr, IpAddr)>> {
+    Ok(get_if_addrs()?
         .iter()
-        .map(Interface::ip)
-        .filter_map(|addr| match addr {
-            IpAddr::V4(addr) => Some(addr),
-            IpAddr::V6(_) => None,
-        })
-        .find(|x| x.is_private())
-        .ok_or(Error::NoLocalInterfaceOpen)
-        .map(|addr| SocketAddrV4::new(addr, 0))
+        .map(|iface| (iface.ip(), netmask_of(&iface.addr)))
+        .filter(|(ip, _)| !ip.is_loopback())
+        .collect())
+}
+
+/// Returns the netmask of an interface address.
+#[cfg(feature = "subscribe")]
+fn netmask_of(addr: &IfAddr) -> IpAddr {
+    match addr {
+        IfAddr::V4(addr) => IpAddr::V4(addr.netmask),
+        IfAddr::V6(addr) => IpAddr::V6(addr.netmask),
+    }
+}
+
+/// Returns whether the address belongs to a private network.
+#[cfg(feature = "subscribe")]
+fn is_private(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => ip.is_private(),
+        // Unique local addresses (fc00::/7). `Ipv6Addr::is_unique_local` is only
+        // available since Rust 1.84, which is newer than our MSRV.
+        IpAddr::V6(ip) => (ip.octets()[0] & 0xfe) == 0xfc,
+    }
+}
+
+#[cfg(feature = "subscribe")]
+/// Picks the local address that is most likely reachable from `peer`.
+///
+/// If `peer` is on the same subnet as one of the local interfaces, the address of that
+/// interface is returned. Otherwise the first private address is used. This avoids
+/// picking the wrong interface on machines with multiple network adapters (for example
+/// a VPN or a virtual machine adapter).
+pub fn pick_local_addr(peer: Option<IpAddr>) -> Result<IpAddr> {
+    let ifaces = local_ifaces()?;
+
+    if ifaces.is_empty() {
+        return Err(Error::NoLocalInterfaceOpen);
+    }
+
+    if let Some(peer) = peer {
+        if let Some((ip, _)) = ifaces
+            .iter()
+            .find(|(ip, netmask)| same_subnet(ip, netmask, &peer))
+        {
+            return Ok(*ip);
+        }
+    }
+
+    if let Some((ip, _)) = ifaces.iter().find(|(ip, _)| is_private(ip)) {
+        return Ok(*ip);
+    }
+
+    Ok(ifaces[0].0)
+}
+
+/// Returns whether `ip` and `peer` are located in the same subnet.
+#[cfg(feature = "subscribe")]
+fn same_subnet(ip: &IpAddr, netmask: &IpAddr, peer: &IpAddr) -> bool {
+    match (ip, netmask, peer) {
+        (IpAddr::V4(ip), IpAddr::V4(netmask), IpAddr::V4(peer)) => {
+            u32::from(*ip) & u32::from(*netmask) == u32::from(*peer) & u32::from(*netmask)
+        }
+        (IpAddr::V6(ip), IpAddr::V6(netmask), IpAddr::V6(peer)) => {
+            u128::from(*ip) & u128::from(*netmask) == u128::from(*peer) & u128::from(*netmask)
+        }
+        _ => false,
+    }
+}
+
+#[cfg(feature = "subscribe")]
+/// Returns the IP address of the peer of `url`, if it is given as a literal address.
+pub fn peer_ip(url: &http::Uri) -> Option<IpAddr> {
+    let host = url.host()?;
+    let host = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host);
+    host.parse().ok()
+}
+
+#[cfg(feature = "subscribe")]
+/// Returns a local IPv4 address and the port 0.
+///
+/// Kept for backwards compatibility, prefer [`pick_local_addr`] which is able to take the
+/// address of the peer into account.
+pub fn get_local_addr() -> Result<SocketAddrV4> {
+    let ifaces = local_ifaces()?;
+
+    let ip = ifaces
+        .iter()
+        .find(|(ip, _)| matches!(ip, IpAddr::V4(_)) && is_private(ip))
+        .or_else(|| ifaces.iter().find(|(ip, _)| matches!(ip, IpAddr::V4(_))))
+        .map(|(ip, _)| *ip)
+        .ok_or(Error::NoLocalInterfaceOpen)?;
+
+    match ip {
+        IpAddr::V4(ip) => Ok(SocketAddrV4::new(ip, 0)),
+        IpAddr::V6(_) => Err(Error::NoLocalInterfaceOpen),
+    }
+}
+
+/// Runs `fut`, giving up after `timeout`.
+///
+/// Requires a tokio runtime with the time driver enabled.
+pub(crate) async fn with_timeout<F, T>(timeout: Duration, fut: F) -> Result<T>
+where
+    F: std::future::Future<Output = Result<T>>,
+{
+    match tokio::time::timeout(timeout, fut).await {
+        Ok(result) => result,
+        Err(_) => Err(Error::Timeout),
+    }
 }
 
 #[cfg(test)]
@@ -154,6 +268,66 @@ mod tests {
     use crate::utils::parse_url_endpoint;
     use roxmltree::Document;
     use std::collections::HashMap;
+    use std::time::Duration;
+
+    #[cfg(feature = "subscribe")]
+    use std::net::IpAddr;
+
+    #[tokio::test]
+    async fn timeout_is_enforced() {
+        let result = crate::utils::with_timeout(Duration::from_millis(50), async {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            Ok::<_, crate::Error>(())
+        })
+        .await;
+
+        assert!(matches!(result, Err(crate::Error::Timeout)));
+    }
+
+    #[cfg(feature = "subscribe")]
+    mod subscribe {
+        use super::*;
+        use crate::utils::{peer_ip, same_subnet};
+        use std::net::Ipv4Addr;
+
+        #[test]
+        fn same_subnet_matches_the_network_part() {
+            let netmask = IpAddr::V4(Ipv4Addr::new(255, 255, 255, 0));
+            let local = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10));
+            let peer_same = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 55));
+            let peer_other = IpAddr::V4(Ipv4Addr::new(192, 168, 2, 55));
+
+            assert!(same_subnet(&local, &netmask, &peer_same));
+            assert!(!same_subnet(&local, &netmask, &peer_other));
+        }
+
+        #[test]
+        fn same_subnet_does_not_mix_ip_versions() {
+            let local = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10));
+            let netmask = IpAddr::V4(Ipv4Addr::new(255, 255, 255, 0));
+            let peer = IpAddr::V6(std::net::Ipv6Addr::LOCALHOST);
+
+            assert!(!same_subnet(&local, &netmask, &peer));
+        }
+
+        #[test]
+        fn peer_ip_parses_literal_addresses() {
+            let url: http::Uri = "http://192.168.1.5:1400/xml/device_description.xml"
+                .parse()
+                .unwrap();
+            assert_eq!(peer_ip(&url), Some("192.168.1.5".parse().unwrap()));
+
+            let url: http::Uri = "http://[fe80::1]:1400/xml/device_description.xml"
+                .parse()
+                .unwrap();
+            assert_eq!(peer_ip(&url), Some("fe80::1".parse().unwrap()));
+
+            let url: http::Uri = "http://example.local/xml/device_description.xml"
+                .parse()
+                .unwrap();
+            assert_eq!(peer_ip(&url), None);
+        }
+    }
 
     #[test]
     fn test_parse_url_endpoint() -> Result<(), Box<dyn std::error::Error>> {

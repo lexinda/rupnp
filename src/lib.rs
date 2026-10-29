@@ -64,4 +64,11 @@ pub use service::Service;
 pub use http;
 pub use ssdp_client as ssdp;
 
+/// The timeout used for HTTP requests to devices when no explicit timeout is given.
+///
+/// Devices on a local network normally answer within a few milliseconds. The timeout
+/// exists so that a device which does not respond at all does not block the caller
+/// forever.
+pub const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 pub(crate) type Result<T, E = Error> = std::result::Result<T, E>;

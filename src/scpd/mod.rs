@@ -10,6 +10,7 @@ use hyper_util::rt::TokioExecutor;
 use roxmltree::{Document, Node};
 use ssdp_client::URN;
 use std::rc::Rc;
+use std::time::Duration;
 
 mod action;
 mod state_variable;
@@ -38,15 +39,18 @@ impl SCPD {
 
     /// Fetches the SCPD description.
     /// The `urn` has to be provided because it isn't included in the description.
-    pub(crate) async fn from_url(url: &Uri, urn: URN) -> Result<Self, Error> {
-        let body = hyper_util::client::legacy::Client::builder(TokioExecutor::new())
-            .build_http::<Empty<Bytes>>()
-            .get(url.clone())
-            .await?
-            .err_if_not_200()?
-            .into_body()
-            .bytes()
-            .await?;
+    pub(crate) async fn from_url(url: &Uri, urn: URN, timeout: Duration) -> Result<Self, Error> {
+        let body = utils::with_timeout(timeout, async {
+            let response = hyper_util::client::legacy::Client::builder(TokioExecutor::new())
+                .build_http::<Empty<Bytes>>()
+                .get(url.clone())
+                .await?
+                .err_if_not_200()?;
+
+            response.into_body().bytes().await
+        })
+        .await?;
+
         let body = std::str::from_utf8(&body)?;
 
         let document = Document::parse(body)?;

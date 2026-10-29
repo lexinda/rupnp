@@ -20,6 +20,8 @@ pub enum Error {
     InvalidResponse(Box<dyn std::error::Error + Send + Sync + 'static>),
     /// The service does not provide an `eventSubURL` and can therefore not be subscribed to.
     EventSubscriptionNotSupported,
+    /// The device did not respond within the configured timeout.
+    Timeout,
 }
 impl Error {
     pub fn invalid_response<E: std::error::Error + Send + Sync + 'static>(err: E) -> Error {
@@ -59,6 +61,7 @@ impl fmt::Display for Error {
                 f,
                 "the service does not provide an `eventSubURL` and cannot be subscribed to"
             ),
+            Error::Timeout => write!(f, "the device did not respond in time"),
         }
     }
 }
