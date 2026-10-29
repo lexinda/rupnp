@@ -1072,3 +1072,100 @@ let results = mp4_tool::to_mp4_batch(
 
 需要硬件编码的场景，目前直接用 `--preset` 搭配 FFmpegCommand 还不够（本模块没暴露
 编码器选择）。可以先用本模块的 `probe` 判断格式，再自己拼 ffmpeg 命令。
+
+---
+
+## 用例 9：音频提取与转换（MP3）
+
+两个操作，都不碰视频流，所以很快：
+
+- **`extract-mp3`** —— 从视频里把音轨抽出来
+- **`to-mp3`** —— 把音频（WAV / FLAC / M4A …）转成 MP3
+
+```bash
+# 从视频提取音轨
+cargo run --bin mp4-tool -- extract-mp3 movie.mp4
+
+# WAV 转 MP3
+cargo run --bin mp4-tool -- to-mp3 song.wav
+
+# 高码率
+cargo run --bin mp4-tool -- to-mp3 song.wav --bitrate 320k
+
+# 语音 / 播客：单声道 64k
+cargo run --bin mp4-tool -- to-mp3 talk.wav --bitrate 64k --channels 1 --sample-rate 44100
+```
+
+输出 `<名字>.mp3`，与输入同目录。支持一次传多个文件，单个失败不影响其它，
+最后汇总失败数。
+
+### 9.1 参数
+
+| 选项 | 说明 |
+|---|---|
+| `-b, --bitrate <码率>` | 默认 `192k`；`320k` 接近无损，`64k` 适合语音 |
+| `--sample-rate <Hz>` | 采样率，例如 `44100`；不指定则保持原样 |
+| `--channels <数量>` | `1` 单声道、`2` 立体声；不指定则保持原样 |
+
+`extract-mp3` 会把视频流丢掉（`-vn`），只取**第一条音轨**（`-map 0:a:0`）。
+
+### 9.2 没有音轨时会明确报错
+
+```console
+$ mp4-tool extract-mp3 noaudio.mp4
+提取 noaudio.mp4 的音轨失败: noaudio.mp4 里没有音轨
+1 个文件失败
+```
+
+退出码非 0，且不会留下半成品文件。这个检查是在调用 ffmpeg 之前用 `ffmpeg -i`
+的输出判断的，比等 ffmpeg 报「Stream map '0:a:0' matches no streams」更清楚。
+
+### 9.3 用库
+
+```rust
+use std::path::Path;
+use rupnp::mp4_tool::{self, Mp3Options};
+
+let ffmpeg = mp4_tool::ensure_ffmpeg(&mp4_tool::FfmpegOptions::default())?;
+
+// 从视频提取，默认 192k
+let mp3 = mp4_tool::extract_mp3(&ffmpeg, Path::new("movie.mp4"), None, &Mp3Options::default())?;
+println!("{}", mp3.display());
+
+// WAV 转 MP3，高码率
+let mp3 = mp4_tool::to_mp3(&ffmpeg, Path::new("song.wav"), None, &Mp3Options::high())?;
+
+// 也可以指定输出路径
+let mp3 = mp4_tool::to_mp3(
+    &ffmpeg,
+    Path::new("song.wav"),
+    Some(Path::new("/data/out.mp3")),
+    &Mp3Options::voice(),
+)?;
+```
+
+`Mp3Options` 提供三个预设：
+
+| 预设 | 码率 | 采样率 | 声道 | 用途 |
+|---|---|---|---|---|
+| `default()` | 192k | 原样 | 原样 | 一般用途 |
+| `high()` | 320k | 原样 | 原样 | 接近无损 |
+| `voice()` | 64k | 44100 | 单声道 | 语音、播客、有声书 |
+
+批量：
+
+```rust
+let results = mp4_tool::to_mp3_batch(
+    &ffmpeg,
+    &["a.wav".into(), "b.wav".into()],
+    &Mp3Options::default(),
+);
+```
+
+### 9.4 为什么比转视频快
+
+只处理音频，没有视频解码和编码。一个 1 小时的视频，提取音轨通常十几秒到一分钟；
+转码成 MP4 则要几分钟到几十分钟。
+
+如果需要**无损**保存音轨，把 `--bitrate` 换成直接 `-c:a copy` 的路径（本模块目前
+只输出 MP3）。WAV 转 MP3 本身就是有损压缩，`320k` 已经接近人耳极限。

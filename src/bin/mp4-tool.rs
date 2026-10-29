@@ -15,7 +15,7 @@
 //! ```
 
 use anyhow::{Context, Result, bail};
-use rupnp::mp4_tool::{self, FfmpegOptions, MediaKind, TranscodeOptions};
+use rupnp::mp4_tool::{self, FfmpegOptions, MediaKind, Mp3Options, TranscodeOptions};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -49,6 +49,8 @@ fn run() -> Result<ExitCode> {
         "insert" => insert(&options),
         "blank" => blank(&options),
         "convert" => convert(&options),
+        "extract-mp3" => extract_mp3(&options),
+        "to-mp3" => to_mp3(&options),
         "" | "-h" | "--help" | "help" => {
             print_help();
             Ok(ExitCode::SUCCESS)
@@ -81,6 +83,12 @@ struct Options {
     crf: Option<u32>,
     /// `convert` 的最大高度。
     max_height: Option<u32>,
+    /// MP3 码率，例如 `192k`。
+    bitrate: Option<String>,
+    /// MP3 采样率。
+    sample_rate: Option<u32>,
+    /// MP3 声道数。
+    channels: Option<u16>,
 }
 
 fn parse_args(args: &[String]) -> Result<Options> {
@@ -142,6 +150,23 @@ fn parse_args(args: &[String]) -> Result<Options> {
                         .with_context(|| format!("--max-height 不是数字: {value}"))?,
                 );
             }
+            "--bitrate" | "-b" => options.bitrate = Some(take_value(&mut index)?),
+            "--sample-rate" => {
+                let value = take_value(&mut index)?;
+                options.sample_rate = Some(
+                    value
+                        .parse()
+                        .with_context(|| format!("--sample-rate 不是数字: {value}"))?,
+                );
+            }
+            "--channels" => {
+                let value = take_value(&mut index)?;
+                options.channels = Some(
+                    value
+                        .parse()
+                        .with_context(|| format!("--channels 不是数字: {value}"))?,
+                );
+            }
             other => options.files.push(PathBuf::from(other)),
         }
 
@@ -167,6 +192,8 @@ mp4-tool —— MP4 / MP3 的检查、修复与常用处理
     mp4-tool blank  [选项] --kind <video|audio> --duration <时长>
                                                          生成黑屏视频 / 静音音频
     mp4-tool convert [选项] <文件>...                     把任意格式转成 MP4
+    mp4-tool extract-mp3 [选项] <视频>...                 从视频里提取音轨存成 MP3
+    mp4-tool to-mp3 [选项] <音频>...                      把音频（如 WAV）转成 MP3
 
 选项:
     --ffmpeg <路径>        指定已有的 ffmpeg 可执行文件，不会下载
@@ -178,6 +205,11 @@ convert 专用选项:
     --preset <名字>        直接指定 x264 preset（ultrafast … veryslow）
     --crf <数字>           直接指定 CRF，越小画质越好
     --max-height <像素>    等比缩小到该高度以内，用于压体积
+
+MP3 专用选项:
+    -b, --bitrate <码率>   例如 128k / 192k / 320k，默认 192k
+    --sample-rate <Hz>     采样率，例如 44100
+    --channels <数量>      声道数，1 或 2
 
 时间格式:
     ffmpeg 的时长写法都支持，例如 90、1:30、00:01:30、00:01:30.500
@@ -197,6 +229,8 @@ convert 专用选项:
     mp4-tool blank  --kind video --duration 5
     mp4-tool convert movie.avi
     mp4-tool convert a.flv b.wmv c.mkv --quality high
+    mp4-tool extract-mp3 movie.mp4
+    mp4-tool to-mp3 song.wav --bitrate 320k
 
 退出码:
     0  成功
@@ -361,6 +395,81 @@ fn blank(options: &Options) -> Result<ExitCode> {
     println!("{} 已生成", output.display());
 
     Ok(ExitCode::SUCCESS)
+}
+
+/// 从视频里提取音轨存成 MP3。
+fn extract_mp3(options: &Options) -> Result<ExitCode> {
+    if options.files.is_empty() {
+        bail!("请至少指定一个视频文件");
+    }
+
+    let mp3 = mp3_options(options);
+    let ffmpeg = mp4_tool::ensure_ffmpeg(&options.ffmpeg)?;
+
+    let mut failed = 0;
+
+    for input in &options.files {
+        match mp4_tool::extract_mp3(&ffmpeg, input, None, &mp3) {
+            Ok(output) => println!("{} 已生成", output.display()),
+            Err(err) => {
+                eprintln!("提取 {} 的音轨失败: {err:#}", input.display());
+                failed += 1;
+            }
+        }
+    }
+
+    if failed > 0 {
+        eprintln!("{failed} 个文件失败");
+        return Ok(ExitCode::FAILURE);
+    }
+
+    Ok(ExitCode::SUCCESS)
+}
+
+/// 把音频（比如 WAV）转成 MP3。
+fn to_mp3(options: &Options) -> Result<ExitCode> {
+    if options.files.is_empty() {
+        bail!("请至少指定一个音频文件");
+    }
+
+    let mp3 = mp3_options(options);
+    let ffmpeg = mp4_tool::ensure_ffmpeg(&options.ffmpeg)?;
+
+    let mut failed = 0;
+
+    for input in &options.files {
+        match mp4_tool::to_mp3(&ffmpeg, input, None, &mp3) {
+            Ok(output) => println!("{} 已生成", output.display()),
+            Err(err) => {
+                eprintln!("转换 {} 失败: {err:#}", input.display());
+                failed += 1;
+            }
+        }
+    }
+
+    if failed > 0 {
+        eprintln!("{failed} 个文件失败");
+        return Ok(ExitCode::FAILURE);
+    }
+
+    Ok(ExitCode::SUCCESS)
+}
+
+/// 从命令行选项里取出 MP3 参数。
+fn mp3_options(options: &Options) -> Mp3Options {
+    let mut mp3 = Mp3Options::default();
+
+    if let Some(bitrate) = &options.bitrate {
+        mp3.bitrate = bitrate.clone();
+    }
+    if let Some(rate) = options.sample_rate {
+        mp3.sample_rate = Some(rate);
+    }
+    if let Some(channels) = options.channels {
+        mp3.channels = Some(channels);
+    }
+
+    mp3
 }
 
 /// 只允许一个输入文件。

@@ -16,11 +16,13 @@
 //! ```
 
 mod atom;
+pub mod audio;
 pub mod ffmpeg;
 pub mod media;
 pub mod transcode;
 
 pub use atom::{Atom, Layout, layout, top_level_atoms};
+pub use audio::{Mp3Options, derived_mp3_path, extract_mp3, to_mp3, to_mp3_batch};
 pub use ffmpeg::{FfmpegOptions, ensure_ffmpeg, remux};
 pub use media::{MediaKind, blank, concat, insert, split};
 pub use transcode::{
