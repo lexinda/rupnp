@@ -18,7 +18,11 @@
 mod atom;
 pub mod ffmpeg;
 pub mod media;
+pub mod transcode;
 
 pub use atom::{Atom, Layout, layout, top_level_atoms};
 pub use ffmpeg::{FfmpegOptions, ensure_ffmpeg, remux};
 pub use media::{MediaKind, blank, concat, insert, split};
+pub use transcode::{
+    MediaInfo, TranscodeOptions, TranscodeOutcome, converted_path, probe, to_mp4, to_mp4_batch,
+};

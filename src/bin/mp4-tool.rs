@@ -15,7 +15,7 @@
 //! ```
 
 use anyhow::{Context, Result, bail};
-use rupnp::mp4_tool::{self, FfmpegOptions, MediaKind};
+use rupnp::mp4_tool::{self, FfmpegOptions, MediaKind, TranscodeOptions};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -48,6 +48,7 @@ fn run() -> Result<ExitCode> {
         "concat" => concat(&options),
         "insert" => insert(&options),
         "blank" => blank(&options),
+        "convert" => convert(&options),
         "" | "-h" | "--help" | "help" => {
             print_help();
             Ok(ExitCode::SUCCESS)
@@ -72,6 +73,14 @@ struct Options {
     at: Option<String>,
     /// `blank` 的媒体类型。
     kind: Option<MediaKind>,
+    /// `convert` 的画质档位。
+    quality: Option<String>,
+    /// `convert` 的 x264 preset。
+    preset: Option<String>,
+    /// `convert` 的 CRF。
+    crf: Option<u32>,
+    /// `convert` 的最大高度。
+    max_height: Option<u32>,
 }
 
 fn parse_args(args: &[String]) -> Result<Options> {
@@ -115,6 +124,24 @@ fn parse_args(args: &[String]) -> Result<Options> {
                     other => bail!("--kind 只能是 video 或 audio，收到 `{other}`"),
                 });
             }
+            "--quality" | "-q" => options.quality = Some(take_value(&mut index)?),
+            "--preset" => options.preset = Some(take_value(&mut index)?),
+            "--crf" => {
+                let value = take_value(&mut index)?;
+                options.crf = Some(
+                    value
+                        .parse()
+                        .with_context(|| format!("--crf 不是数字: {value}"))?,
+                );
+            }
+            "--max-height" => {
+                let value = take_value(&mut index)?;
+                options.max_height = Some(
+                    value
+                        .parse()
+                        .with_context(|| format!("--max-height 不是数字: {value}"))?,
+                );
+            }
             other => options.files.push(PathBuf::from(other)),
         }
 
@@ -139,11 +166,18 @@ mp4-tool —— MP4 / MP3 的检查、修复与常用处理
                                                          在指定时间插入一段
     mp4-tool blank  [选项] --kind <video|audio> --duration <时长>
                                                          生成黑屏视频 / 静音音频
+    mp4-tool convert [选项] <文件>...                     把任意格式转成 MP4
 
 选项:
     --ffmpeg <路径>        指定已有的 ffmpeg 可执行文件，不会下载
     --ffmpeg-url <地址>    ffmpeg 的下载地址
     --ffmpeg-dir <目录>    ffmpeg 下载到哪个目录
+
+convert 专用选项:
+    -q, --quality <档位>   fast | balanced | high，默认 balanced
+    --preset <名字>        直接指定 x264 preset（ultrafast … veryslow）
+    --crf <数字>           直接指定 CRF，越小画质越好
+    --max-height <像素>    等比缩小到该高度以内，用于压体积
 
 时间格式:
     ffmpeg 的时长写法都支持，例如 90、1:30、00:01:30、00:01:30.500
@@ -161,6 +195,8 @@ mp4-tool —— MP4 / MP3 的检查、修复与常用处理
     mp4-tool concat part1.mp4 part2.mp4 part3.mp4
     mp4-tool insert movie.mp4 --insert ad.mp4 --at 00:05:00
     mp4-tool blank  --kind video --duration 5
+    mp4-tool convert movie.avi
+    mp4-tool convert a.flv b.wmv c.mkv --quality high
 
 退出码:
     0  成功
@@ -334,6 +370,73 @@ fn single_input<'a>(options: &'a Options, command: &str) -> Result<&'a Path> {
         [] => bail!("{command} 需要一个输入文件"),
         _ => bail!("{command} 只接受一个输入文件"),
     }
+}
+
+/// 把任意格式转成 MP4。
+fn convert(options: &Options) -> Result<ExitCode> {
+    if options.files.is_empty() {
+        bail!("请至少指定一个输入文件");
+    }
+
+    let mut transcode = match options.quality.as_deref() {
+        None | Some("balanced") => TranscodeOptions::default(),
+        Some("fast") => TranscodeOptions::fast(),
+        Some("high") => TranscodeOptions::high_quality(),
+        Some(other) => bail!("--quality 只能是 fast / balanced / high，收到 `{other}`"),
+    };
+
+    if let Some(preset) = &options.preset {
+        transcode.preset = preset.clone();
+    }
+    if let Some(crf) = options.crf {
+        transcode.crf = crf;
+    }
+    if let Some(height) = options.max_height {
+        transcode.max_height = Some(height);
+    }
+
+    let ffmpeg = mp4_tool::ensure_ffmpeg(&options.ffmpeg)?;
+
+    let mut failed = 0;
+
+    for input in &options.files {
+        let output = mp4_tool::converted_path(input);
+
+        eprintln!("转换 {} -> {}", input.display(), output.display());
+
+        match mp4_tool::to_mp4(&ffmpeg, input, &output, &transcode) {
+            Ok(outcome) if outcome.remuxed => {
+                println!("{} 已生成（只换容器，未重编码）", outcome.output.display());
+            }
+            Ok(outcome) => {
+                let mut what = Vec::new();
+                if outcome.reencoded_video {
+                    what.push("视频");
+                }
+                if outcome.reencoded_audio {
+                    what.push("音频");
+                }
+                let what = if what.is_empty() {
+                    "无需重编码".to_string()
+                } else {
+                    format!("重编码{}", what.join("+"))
+                };
+
+                println!("{} 已生成（{what}）", outcome.output.display());
+            }
+            Err(err) => {
+                eprintln!("转换 {} 失败: {err:#}", input.display());
+                failed += 1;
+            }
+        }
+    }
+
+    if failed > 0 {
+        eprintln!("{failed} 个文件转换失败");
+        return Ok(ExitCode::FAILURE);
+    }
+
+    Ok(ExitCode::SUCCESS)
 }
 
 /// 修复后的输出路径：`<名字>.faststart.mp4`。

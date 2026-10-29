@@ -957,8 +957,118 @@ let out = media::blank(&ffmpeg, MediaKind::Video, "4")?;
 | `concat` | `<第一个输入名字>.concat.<扩展名>`，与输入同目录 |
 | `insert` | `<名字>.inserted.<扩展名>`，与输入同目录 |
 | `blank` | 系统临时目录 `rupnp-blank-<pid>-<nanos>.<扩展名>` |
+| `convert` | `<名字>.converted.mp4`，与输入同目录 |
 
 `insert` 切出来的两段放在系统临时目录，命令结束后自动删除。
 
 > 所有操作都**不会覆盖输入文件**。同一份输入多次执行 `split` 会覆盖上一次的
 > `.cut.` 输出。
+
+---
+
+## 用例 8：通用格式转 MP4
+
+把 AVI / FLV / WMV / MOV / MKV 等转成 MP4。和 `split` / `concat` 不同，
+这里输入容器和编码都未知，必要时必须重编码。
+
+```bash
+# 单个文件
+cargo run --bin mp4-tool -- convert movie.avi
+
+# 批量，画质优先
+cargo run --bin mp4-tool -- convert a.flv b.wmv c.mkv --quality high
+
+# 压体积：等比缩到 720p 以内
+cargo run --bin mp4-tool -- convert movie.mkv --max-height 720
+```
+
+输出 `<名字>.converted.mp4`。**批量时单个文件失败不会中断整批**，最后汇总失败数。
+
+### 8.1 性能：先探测，能 copy 就不转
+
+转码是整条链路上最贵的一步。这个实现会先跑一次 `ffmpeg -i` 探测容器和编码，
+再决定要不要重编码：
+
+| 输入情况 | 做法 | 耗时相对 |
+|---|---|---|
+| MP4 + H.264 + AAC | **只换容器**（`-c copy` + faststart） | 秒级，画质零损失 |
+| 视频已是 H.264，音频不是 | 只重编码音频 | 很省 |
+| 视频不是 H.264（WMV/FLV/HEVC…） | 重编码视频，音频能 copy 就 copy | 全量 |
+
+实测三种码流组合的输出：
+
+```
+avi/mpeg4/mp3   -> h264/aac   重编码视频+音频
+mkv/hevc/ac3    -> h264/aac   重编码视频+音频
+mp4/h264/mp3    -> h264/aac   只重编码音频
+mp4/h264/aac    -> h264/aac   只换容器，未重编码
+```
+
+### 8.2 画质档位
+
+| 档位 | preset | CRF | 音频 | 适用 |
+|---|---|---|---|---|
+| `--quality fast` | `ultrafast` | 28 | 128k | 批量预处理，速度优先 |
+| 默认（balanced） | `veryfast` | 23 | 128k | 一般用途 |
+| `--quality high` | `slow` | 20 | 192k | 最终交付 |
+
+也可以直接指定 `--preset` / `--crf` / `--max-height` 覆盖。
+
+`preset` 对速度的影响很大：`ultrafast` 比 `veryslow` 快 10～20 倍，体积则大
+2～3 倍。批量转码一律先用 `fast`，确认没问题再对最终产物重跑 `high`。
+
+### 8.3 输出参数
+
+默认偏向「能被 DLNA 渲染器直接播放」：
+
+- 视频 `libx264` + `yuv420p`（兼容性最好，10bit / 444 很多电视解不了）
+- 音频 `aac` `128k`
+- `-movflags +faststart`（moov 前置，投屏必需，见
+  [常见问题排查](#常见问题排查)）
+
+这些都可以在 `TranscodeOptions` 里改。
+
+### 8.4 用库
+
+```rust
+use std::path::Path;
+use rupnp::mp4_tool::{self, TranscodeOptions};
+
+let ffmpeg = mp4_tool::ensure_ffmpeg(&mp4_tool::FfmpegOptions::default())?;
+
+// 先看看是什么格式，决定要不要转
+let info = mp4_tool::probe(&ffmpeg, Path::new("movie.mkv"))?;
+println!("{} / {:?} / {:?}", info.format, info.video_codec, info.audio_codec);
+
+// 转码
+let outcome = mp4_tool::to_mp4(
+    &ffmpeg,
+    Path::new("movie.mkv"),
+    Path::new("movie.converted.mp4"),
+    &TranscodeOptions::high_quality(),
+)?;
+
+println!(
+    "remuxed={} 视频重编码={} 音频重编码={}",
+    outcome.remuxed, outcome.reencoded_video, outcome.reencoded_audio
+);
+
+// 批量
+let results = mp4_tool::to_mp4_batch(
+    &ffmpeg,
+    &["a.avi".into(), "b.flv".into()],
+    &TranscodeOptions::default(),
+);
+```
+
+### 8.5 转码为什么慢
+
+`-c copy` 只搬字节；一旦重编码，CPU 就要逐帧解码 + 编码。影响速度的因素按重要性排序：
+
+1. **分辨率** —— 1080p 比 720p 慢 2～3 倍
+2. **preset** —— 见上表
+3. **是否用硬件编码** —— `h264_nvenc` / `h264_qsv` / `h264_videotoolbox` 能快 3～10 倍，
+   但画质同码率下略差，且需要显卡支持
+
+需要硬件编码的场景，目前直接用 `--preset` 搭配 FFmpegCommand 还不够（本模块没暴露
+编码器选择）。可以先用本模块的 `probe` 判断格式，再自己拼 ffmpeg 命令。

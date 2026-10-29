@@ -111,10 +111,12 @@ cargo run --bin mp4-tool -- fix movie.mp4     # 重新封装（自动准备 ffmp
 | `concat` | 按顺序拼接（要求同容器同编码） |
 | `insert` | 在指定时间插入一段 |
 | `blank` | 生成黑屏视频 / 静音音频 |
+| `convert` | 把 AVI / FLV / WMV / MOV / MKV 等转成 MP4（能 copy 就不转码） |
 
 底层 API 在 [`../src/mp4_tool/`](../src/mp4_tool/)：
 `top_level_atoms` / `layout` / `ensure_ffmpeg` / `remux`，
-以及 `media::split` / `media::concat` / `media::insert` / `media::blank`。
+`media::split` / `media::concat` / `media::insert` / `media::blank`，
+以及 `probe` / `to_mp4` / `to_mp4_batch` / `TranscodeOptions`。
 
 > examples 是**手工验证工具**，不会被 `cargo test` 执行，因为它们需要局域网里真实存在
 > UPnP 设备。可自动化跑的测试是 `cargo test` 覆盖的单元测试与文档测试。
