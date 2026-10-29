@@ -23,6 +23,7 @@ action、读取服务描述，以及订阅设备的状态变化事件。
 | 4 | [调用自定义 action](use-cases.md#用例-4调用自定义-action) | 中 | 参数值要自己转义 |
 | 5 | [批量发现与设备筛选](use-cases.md#用例-5批量发现与设备筛选) | 易 | `services_iter()` / `devices_iter()` 是递归的 |
 | 6 | [投文档（PPT / Word）](use-cases.md#用例-6投文档ppt--word) | 中 | 标准 DLNA 不支持直接投，要先转成图片或视频 |
+| — | [常见问题排查](use-cases.md#常见问题排查) | — | 投屏失败的分层定位：HTTP → 容器（moov）→ 编码 → 网络 |
 
 ## 三十秒上手
 
@@ -88,6 +89,12 @@ async fn main() -> Result<(), rupnp::Error> {
 | [`dump_scpd.rs`](../examples/dump_scpd.rs) | 导出所有设备的 SCPD，便于离线分析 |
 | [`subscribe.rs`](../examples/subscribe.rs) | 订阅事件，打印状态变化 |
 | [`cast.rs`](../examples/cast.rs) | 把一个媒体地址投到 DLNA 渲染器 |
+
+## 脚本
+
+| 文件 | 说明 |
+|---|---|
+| [`scripts/mp4_atoms.py`](scripts/mp4_atoms.py) | 检查 MP4 的 atom 布局，判断是否适合 HTTP Range 播放 |
 
 > examples 是**手工验证工具**，不会被 `cargo test` 执行，因为它们需要局域网里真实存在
 > UPnP 设备。可自动化跑的测试是 `cargo test` 覆盖的单元测试与文档测试。

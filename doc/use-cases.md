@@ -230,6 +230,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "fs"] }
 | 电视上不显示标题 | DIDL-Lite 没传，或 `dc:title` 命名空间没声明 |
 | 事件收不到 | 回调 IP 选错（多网卡）→ 用 `subscribe_with_callback` 显式指定 |
 
+> **同一个服务器，有的 MP4 能播有的不能** —— 大概率是 MP4 的 `moov` 位置问题。
+> 完整的分层排查流程见 [常见问题排查](#常见问题排查)。
+
 ---
 
 ## 用例 2：设备状态查询与音量控制
@@ -561,6 +564,8 @@ async fn main() -> Result<(), rupnp::Error> {
 - `protocolInfo` 用 `http-get:*:image/jpeg:*`（PNG 则是 `image/png`）
 - **图片同样需要支持 Range**，很多渲染器拉图片时也发 Range 请求
 
+> 图片投屏失败时，同样按 [常见问题排查](#常见问题排查) 的流程走。
+
 ### 6.3 路线 B：转成视频（体验最好）
 
 唯一能保留翻页动画的方案 —— 翻页变成视频里的转场，**零延迟**。
@@ -657,3 +662,175 @@ let has_list = scpd
 ```
 
 彻底消除延迟还是走路线 B（转视频）。
+
+---
+
+## 常见问题排查
+
+投屏失败的根因分布在三个层次，**按顺序排查**能最快定位。
+
+```
+① HTTP 层    服务器的 Range 响应合规吗？
+       ↓ 是
+② 容器层    MP4 的 moov 在 mdat 之前吗？      ← 90% 的情况栽在这
+       ↓ 是
+③ 编码层    渲染器解得了这个编码吗？
+       ↓ 是
+④ 网络层    渲染器和服务器之间有没有中间设备捣乱？
+```
+
+---
+
+### 第 1 步：HTTP 层
+
+渲染器拉流的标准请求序列是：
+
+```
+HEAD /movie.mp4                    → 拿 Content-Length
+GET  /movie.mp4  Range: bytes=0-   → 206 Partial Content
+GET  /movie.mp4  Range: bytes=N-   → 206，seek 时用
+```
+
+**响应只要有一处不合规，有些渲染器会直接放弃**：
+
+| 问题 | 症状 |
+|---|---|
+| 不支持 Range，返回 200 + 全量 | 每次从头拉，或者直接报错 |
+| 返回 200 而不是 **206** | 渲染器可能当成错误 |
+| 缺 `Accept-Ranges: bytes` | 渲染器不知道能 seek，直接放弃 |
+| `Content-Range` 格式不对 | 解析失败 |
+| 只支持单区间，不支持多区间 `bytes=0-100,200-300` | 有的渲染器会发多区间请求 |
+| `Content-Type` 不是 `video/mp4`（比如 `application/octet-stream`） | 有的渲染器按 mime 判断能力 |
+| HEAD 没实现，或返回的 `Content-Length` 与 GET 不一致 | 渲染器认为文件变了 |
+
+验证（这两条必须过）：
+
+```bash
+curl -I http://your-server/movie.mp4
+# 需要看到：200 OK / Accept-Ranges: bytes / Content-Length / Content-Type: video/mp4
+
+curl -r 0-1023 -o /dev/null -D - http://your-server/movie.mp4
+# 需要看到：206 Partial Content / Content-Range: bytes 0-1023/<总长> / Content-Length: 1024
+```
+
+---
+
+### 第 2 步：容器层 —— moov 在哪（最常见）
+
+MP4 的顶层结构是若干 atom：
+
+```
+[ftyp] [moov] [mdat]     ← moov 在前（fast start 已优化）
+[ftyp] [mdat] [moov]     ← moov 在后（未优化）
+```
+
+**`moov` 里装着播放必需的信息**：时长、轨道、编码参数、sample 索引
+（`stco`/`co64`）、关键帧表（`stss`）。
+
+- **moov 在前** → 渲染器第一次 `Range: bytes=0-` 就拿到 moov，立刻知道文件多长、
+  编码是什么、关键帧在哪 → **秒开** ✓
+- **moov 在后** → 渲染器第一次只拿到 ftyp 和一堆 mdat 数据，**它不知道文件多长、
+  也不知道编码是什么**，必须把整个文件下载完才能读到末尾的 moov →
+  2GB 的文件就要等下载完 2GB 才能播 → **表现为一直转圈或直接超时失败**
+
+诊断脚本（仓库里的 `doc/scripts/mp4_atoms.py`）：
+
+```bash
+python doc/scripts/mp4_atoms.py movie.mp4
+```
+
+```
+=== movie.mp4 ===
+          偏移  atom               大小
+----------------------------------------
+           0  ftyp               24
+          24  moov             1234
+        1258  mdat        2097152
+
+结论: moov 在 mdat 之前 —— fast start 已优化，可以秒开
+```
+
+退出码 0 表示布局良好，1 表示需要重新封装（可以拿来做批量检查）。
+
+**修复**：
+
+```bash
+ffmpeg -i input.mp4 -c copy -movflags +faststart output.mp4
+```
+
+`-c copy` 表示不重编码，只是把 moov 搬到文件头，**画质无损、速度快**。
+
+> 为什么有些文件天然就是 fast start、有些不是？因为**录制顺序不同**。
+> 相机、录屏软件边录边写，moov 只能在录制结束时才写到末尾；而经过 ffmpeg
+> 或 Web 转码的文件通常已经优化过了。
+
+---
+
+### 第 3 步：编码层
+
+容器和 HTTP 都对，编码不支持照样黑屏：
+
+| 类型 | 支持情况 |
+|---|---|
+| H.264 (AVC) | ✅ 几乎所有设备 |
+| H.265 / HEVC | ⚠️ **很多老电视不支持** |
+| MPEG-2 | ✅ 普遍支持（老标准） |
+| VP9 / AV1 | ❌ 基本不支持 |
+| AAC / MP3 / AC-3 | ✅ |
+| Opus / FLAC | ⚠️ 视设备 |
+| H.264 10bit | ❌ 多数电视只支持 8bit |
+| YUV422p / YUV444p | ❌ 多数电视只支持 YUV420p |
+
+检查：
+
+```bash
+ffprobe -v error -select_streams v:0 \
+  -show_entries stream=codec_name,profile,level,pix_fmt,width,height \
+  -of default=nw=1 input.mp4
+```
+
+重点看 `codec_name` 是不是 `h264`、`pix_fmt` 是不是 `yuv420p`。
+
+---
+
+### 第 4 步：网络层
+
+用 `curl -r` 从**渲染器所在的网络**测一遍，而不是从本机测。
+企业代理、防火墙、透明网关可能截断或重组 Range 响应。
+
+另外确认渲染器真的能连到你的服务器：
+
+- 服务器在 Docker / 虚拟机里，端口没映射到局域网
+- 机器有多张网卡，渲染器连到的不是你以为的那个地址
+- 路由器开了 **AP 隔离**（client isolation），客户端之间互不通信
+
+---
+
+### 症状速查
+
+| 症状 | 最可能的原因 |
+|---|---|
+| 一直转圈，几分钟后突然开始播 | moov 在文件末尾（第 2 步） |
+| 立刻报错 / 拒绝播放 | HTTP 响应不合规，或编码不支持 |
+| 能播但进度条不动 | `mvhd.duration` 为 0，或缺 `stss` 关键帧表 |
+| 能播，拖进度条就跳回开头 | 缺关键帧索引，或 `stco` 偏移量错误 |
+| 播到一半断掉 | 文件被截断，或索引指向了文件外 |
+| 同一个服务器，有的文件能播有的不能 | moov 位置不同（第 2 步） |
+| 提示格式错误 / 不支持的格式 | fMP4（`moof`+`mfra`）老渲染器不认，或编码是 HEVC |
+| 偶尔能播偶尔不能 | 网络中间设备干扰（第 4 步） |
+
+---
+
+### 其它值得知道的坑
+
+**碎片化 MP4（fMP4）**
+HLS / DASH 直播用的 `moof` + `mfra` 结构，**老渲染器不认**。症状是
+"格式错误"而不是"转圈"，和 moov 问题表现完全不同，别搞混。
+
+**索引缺失或文件被截断**
+没有 `stss`（关键帧表）→ seek 直接失败；`stco`/`co64` 的偏移量对不上
+（文件下载不完整或被改过）→ 播到某处就断。
+
+**能播但不能 seek**
+moov 正常但 `stss` 缺失，或关键帧全是 P 帧 —— 表现为能播，拖进度条就卡死
+或跳回开头。
