@@ -733,10 +733,10 @@ MP4 的顶层结构是若干 atom：
   也不知道编码是什么**，必须把整个文件下载完才能读到末尾的 moov →
   2GB 的文件就要等下载完 2GB 才能播 → **表现为一直转圈或直接超时失败**
 
-诊断脚本（仓库里的 `doc/scripts/mp4_atoms.py`）：
+诊断工具（仓库里的 `tools/mp4-tool`，纯 Rust 实现）：
 
 ```bash
-python doc/scripts/mp4_atoms.py movie.mp4
+cargo run -p mp4-tool -- check movie.mp4
 ```
 
 ```
@@ -751,14 +751,29 @@ python doc/scripts/mp4_atoms.py movie.mp4
 ```
 
 退出码 0 表示布局良好，1 表示需要重新封装（可以拿来做批量检查）。
+`check` 只需要读文件，不需要 ffmpeg。
 
 **修复**：
 
 ```bash
-ffmpeg -i input.mp4 -c copy -movflags +faststart output.mp4
+cargo run -p mp4-tool -- fix movie.mp4
 ```
 
-`-c copy` 表示不重编码，只是把 moov 搬到文件头，**画质无损、速度快**。
+它会调 ffmpeg 做 `-c copy -movflags +faststart`，**不重编码、画质无损**，
+结果写到 `movie.faststart.mp4`。
+
+本机没有 ffmpeg 的话会自动下载一个 —— 下载走 Rust 的 HTTP 客户端
+（`ffmpeg-sidecar` 的 ureq），**不依赖系统里有没有 curl**，下载过程会显示进度。
+
+国内网络直连境外下载源可能很慢甚至卡住，这时可以指定镜像：
+
+```bash
+cargo run -p mp4-tool -- fix --ffmpeg-url \
+  https://gh-proxy.com/https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip \
+  movie.mp4
+```
+
+也可以用环境变量 `FFMPEG_SIDECAR_URL` 设置默认镜像。
 
 > 为什么有些文件天然就是 fast start、有些不是？因为**录制顺序不同**。
 > 相机、录屏软件边录边写，moov 只能在录制结束时才写到末尾；而经过 ffmpeg

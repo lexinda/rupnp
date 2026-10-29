@@ -90,11 +90,16 @@ async fn main() -> Result<(), rupnp::Error> {
 | [`subscribe.rs`](../examples/subscribe.rs) | 订阅事件，打印状态变化 |
 | [`cast.rs`](../examples/cast.rs) | 把一个媒体地址投到 DLNA 渲染器 |
 
-## 脚本
+## 工具
 
 | 文件 | 说明 |
 |---|---|
-| [`scripts/mp4_atoms.py`](scripts/mp4_atoms.py) | 检查 MP4 的 atom 布局，判断是否适合 HTTP Range 播放 |
+| [`../tools/mp4-tool/`](../tools/mp4-tool/) | 检查与修复 MP4 的 atom 布局，使其适合 HTTP Range 播放 |
+
+```bash
+cargo run -p mp4-tool -- check movie.mp4   # 检查，不需要 ffmpeg
+cargo run -p mp4-tool -- fix movie.mp4     # 重新封装（自动准备 ffmpeg）
+```
 
 > examples 是**手工验证工具**，不会被 `cargo test` 执行，因为它们需要局域网里真实存在
 > UPnP 设备。可自动化跑的测试是 `cargo test` 覆盖的单元测试与文档测试。

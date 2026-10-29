@@ -351,13 +351,12 @@ pub fn pick_local_addr(peer: Option<IpAddr>) -> Result<IpAddr> {
         return Err(Error::NoLocalInterfaceOpen);
     }
 
-    if let Some(peer) = peer {
-        if let Some((ip, _)) = ifaces
+    if let Some((ip, _)) = peer.and_then(|peer| {
+        ifaces
             .iter()
             .find(|(ip, netmask)| same_subnet(ip, netmask, &peer))
-        {
-            return Ok(*ip);
-        }
+    }) {
+        return Ok(*ip);
     }
 
     if let Some((ip, _)) = ifaces.iter().find(|(ip, _)| is_private(ip)) {
