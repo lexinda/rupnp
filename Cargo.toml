@@ -45,3 +45,7 @@ anyhow = "1.0"
 [[example]]
 name = "subscribe"
 required-features = ["subscribe"]
+
+[[example]]
+name = "cast"
+required-features = ["subscribe"]

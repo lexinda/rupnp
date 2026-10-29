@@ -48,13 +48,19 @@
 //! ```
 // TODO: doc include when it gets stable
 
+/// Helpers for the UPnP AVTransport service.
+pub mod avtransport;
 mod device;
+/// Builder for DIDL-Lite metadata.
+pub mod didl;
 mod discovery;
 mod error;
 /// Service Control Protocol Description.
 pub mod scpd;
 mod service;
 pub mod utils;
+/// Helpers for building XML payloads.
+pub mod xml;
 
 pub use device::{Device, DeviceSpec};
 pub use discovery::{discover, discover_with_properties};
