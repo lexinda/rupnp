@@ -48,8 +48,11 @@
 //! ```
 // TODO: doc include when it gets stable
 
+/// The response of a UPnP action.
+pub mod action;
 /// Helpers for the UPnP AVTransport service.
 pub mod avtransport;
+mod client;
 mod device;
 /// Builder for DIDL-Lite metadata.
 pub mod didl;
@@ -62,6 +65,7 @@ pub mod utils;
 /// Helpers for building XML payloads.
 pub mod xml;
 
+pub use action::ActionResponse;
 pub use device::{Device, DeviceSpec};
 pub use discovery::{discover, discover_with_properties};
 pub use error::Error;

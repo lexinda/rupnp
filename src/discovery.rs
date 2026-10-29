@@ -1,7 +1,11 @@
-use crate::{Device, Error, Result};
-use futures_util::stream::{Stream, StreamExt, TryStreamExt};
+use crate::{Device, Result};
+use futures_util::stream::{Stream, StreamExt};
+use http::Uri;
 use ssdp_client::SearchTarget;
 use std::time::Duration;
+
+/// The maximum number of device descriptions that are fetched at the same time.
+const MAX_CONCURRENT_FETCHES: usize = 8;
 
 /// Discovers UPnP devices on the network.
 ///
@@ -68,7 +72,11 @@ pub async fn discover_with_properties<'a>(
 ) -> Result<impl Stream<Item = Result<Device>> + 'a> {
     Ok(ssdp_client::search(search_target, timeout, 3, ttl)
         .await?
-        .map_err(Error::SSDPError)
-        .map(|res| Ok(res?.location().parse()?))
-        .and_then(move |url| Device::from_url_and_properties(url, extra_keys)))
+        .map(move |res| async move {
+            let url: Uri = res?.location().parse()?;
+            Device::from_url_and_properties(url, extra_keys).await
+        })
+        // Fetch the device descriptions concurrently. `buffered` keeps the order of the
+        // ssdp responses, so the devices are still yielded in the same order as before.
+        .buffered(MAX_CONCURRENT_FETCHES))
 }

@@ -6,7 +6,7 @@
 //! server running on this machine.
 
 use futures::prelude::*;
-use rupnp::avtransport;
+use rupnp::avtransport::Cast;
 use rupnp::didl::{class, Didl, DidlItem, DidlResource};
 use rupnp::ssdp::{SearchTarget, URN};
 use std::time::Duration;
@@ -29,6 +29,8 @@ async fn main() -> Result<(), rupnp::Error> {
 
         println!("Casting to {} ({})", device.friendly_name(), device.url());
 
+        let cast = Cast::new(service.clone(), device.url().clone());
+
         let didl = Didl::new()
             .item(
                 DidlItem::new()
@@ -42,22 +44,23 @@ async fn main() -> Result<(), rupnp::Error> {
             .to_xml();
 
         // The metadata is escaped by the helper, so it can be embedded into the payload.
-        let payload = avtransport::set_av_transport_uri_payload(0, &media_url, Some(&didl));
+        cast.set_uri(&media_url, Some(&didl)).await?;
+        cast.play().await?;
 
-        service
-            .action(device.url(), "SetAVTransportURI", &payload)
-            .await?;
-        service
-            .action(device.url(), "Play", &avtransport::play_payload(0, 1.0))
-            .await?;
+        // Follow the playback until the media is done.
+        loop {
+            let info = cast.position_info().await?;
 
-        // Subscribe to the transport state to follow the playback.
-        let (_sid, mut stream) = service.subscribe(device.url(), 300).await?;
+            println!(
+                "  track {} of {} at {} / {}",
+                info.track, info.abs_count, info.rel_time, info.track_duration
+            );
 
-        while let Some(state_vars) = stream.try_next().await? {
-            for (key, value) in state_vars {
-                println!("  {key} => {value}");
+            if !cast.state().await?.is_playing() {
+                break;
             }
+
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
 
         return Ok(());

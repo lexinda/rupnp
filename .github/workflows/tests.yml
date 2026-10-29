@@ -25,7 +25,32 @@ jobs:
         with:
           toolchain: stable
           components: clippy
-      - run: cargo clippy --all-targets --all-features
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+
+  # Build and test every feature combination. The features are not additive, so a
+  # combination that is broken would not be caught by the --all-features build.
+  features:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features:
+          - --no-default-features
+          - --no-default-features --features subscribe
+          - --no-default-features --features full_device_spec
+          - --features full_device_spec
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+      - name: Build
+        run: cargo build --workspace ${{ matrix.features }}
+      - name: Test
+        run: cargo test --workspace ${{ matrix.features }} --no-fail-fast
+        env:
+          RUST_BACKTRACE: full
 
   tests:
     runs-on: ubuntu-latest

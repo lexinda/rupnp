@@ -21,8 +21,8 @@ subscribe = ["dep:genawaiter", "dep:if-addrs", "tokio/net", "tokio/io-util"]
 
 [dependencies]
 # tokio is required because the HTTP client runs on a tokio runtime anyway and the
-# request timeouts need its timer.
-tokio = { version = "1.0", features = ["time"] }
+# request timeouts need its timer. The net feature is needed by the http connector.
+tokio = { version = "1.0", features = ["time", "net"] }
 futures-core = "0.3"
 futures-util = { version = "0.3", default-features = false }
 genawaiter = { version = "0.99", default-features = false, features = ["futures03"], optional = true }

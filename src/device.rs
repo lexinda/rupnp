@@ -3,10 +3,7 @@ use crate::{
     utils::{self, HttpResponseExt, HyperBodyExt},
     Result, Service,
 };
-use bytes::Bytes;
 use http::Uri;
-use http_body_util::Empty;
-use hyper_util::rt::TokioExecutor;
 use roxmltree::{Document, Node};
 use ssdp_client::URN;
 use std::collections::HashMap;
@@ -56,8 +53,7 @@ impl Device {
         timeout: Duration,
     ) -> Result<Self> {
         let body = utils::with_timeout(timeout, async {
-            let response = hyper_util::client::legacy::Client::builder(TokioExecutor::new())
-                .build_http::<Empty<Bytes>>()
+            let response = crate::client::client()
                 .get(url.clone())
                 .await?
                 .err_if_not_200()?;

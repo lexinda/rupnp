@@ -3,10 +3,7 @@ use crate::{
     utils::{self, HttpResponseExt, HyperBodyExt},
     Error,
 };
-use bytes::Bytes;
 use http::Uri;
-use http_body_util::Empty;
-use hyper_util::rt::TokioExecutor;
 use roxmltree::{Document, Node};
 use ssdp_client::URN;
 use std::rc::Rc;
@@ -41,8 +38,7 @@ impl SCPD {
     /// The `urn` has to be provided because it isn't included in the description.
     pub(crate) async fn from_url(url: &Uri, urn: URN, timeout: Duration) -> Result<Self, Error> {
         let body = utils::with_timeout(timeout, async {
-            let response = hyper_util::client::legacy::Client::builder(TokioExecutor::new())
-                .build_http::<Empty<Bytes>>()
+            let response = crate::client::client()
                 .get(url.clone())
                 .await?
                 .err_if_not_200()?;

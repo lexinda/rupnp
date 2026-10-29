@@ -1,4 +1,5 @@
 use crate::{
+    action::ActionResponse,
     error::{Error, UPnPError},
     find_in_xml,
     scpd::SCPD,
@@ -11,8 +12,7 @@ use bytes::Bytes;
 use futures_core::stream::Stream;
 #[cfg(feature = "subscribe")]
 use genawaiter::sync::{Co, Gen};
-use http_body_util::Empty;
-use hyper_util::{client::legacy::Client, rt::TokioExecutor};
+use http_body_util::Full;
 use log::debug;
 #[cfg(feature = "subscribe")]
 use tokio::{
@@ -145,6 +145,50 @@ impl Service {
             .await
     }
 
+    /// Execute some UPnP Action on this service, keeping the order of the returned
+    /// arguments.
+    ///
+    /// This behaves like [`action`](Service::action), but the response is an
+    /// [`ActionResponse`] instead of a [`HashMap`].
+    ///
+    /// # Example usage:
+    ///
+    /// ```rust,no_run
+    /// # use ssdp_client::URN;
+    /// # async fn rendering_control_example() -> Result<(), rupnp::Error> {
+    /// # let some_url = unimplemented!();
+    /// use rupnp::ssdp::URN;
+    /// use rupnp::Device;
+    ///
+    /// let urn = URN::service("schemas-upnp-org", "RenderingControl", 1);
+    ///
+    /// let device = Device::from_url( some_url ).await?;
+    /// let service = device.find_service(&urn)
+    ///     .expect("service exists");
+    ///
+    /// let args = "<InstanceID>0</InstanceID><Channel>Master</Channel>";
+    /// let response = service
+    ///     .action_ordered(device.url(), "GetVolume", args)
+    ///     .await?;
+    ///
+    /// let volume = response
+    ///     .get("CurrentVolume")
+    ///     .expect("exists");
+    ///
+    /// println!("Volume: {}", volume);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn action_ordered(
+        &self,
+        url: &Uri,
+        action: &str,
+        payload: &str,
+    ) -> Result<ActionResponse> {
+        self.action_ordered_with_timeout(url, action, payload, crate::DEFAULT_TIMEOUT)
+            .await
+    }
+
     /// Execute some UPnP Action on this service, giving up after `timeout`.
     ///
     /// This behaves like [`action`](Service::action), but the request is aborted when the
@@ -156,6 +200,21 @@ impl Service {
         payload: &str,
         timeout: Duration,
     ) -> Result<HashMap<String, String>> {
+        Ok(self
+            .action_ordered_with_timeout(url, action, payload, timeout)
+            .await?
+            .into_map())
+    }
+
+    /// Execute some UPnP Action on this service, keeping the order of the returned
+    /// arguments and giving up after `timeout`.
+    pub async fn action_ordered_with_timeout(
+        &self,
+        url: &Uri,
+        action: &str,
+        payload: &str,
+        timeout: Duration,
+    ) -> Result<ActionResponse> {
         let body = format!(
             r#"
             <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"
@@ -176,12 +235,11 @@ impl Service {
         let request = Request::post(self.control_url(url))
             .header("CONTENT-TYPE", "text/xml; charset=\"utf-8\"")
             .header("SOAPAction", soap_action)
-            .body(body)
+            .body(Full::new(Bytes::from(body)))
             .expect("infallible");
 
         let doc = utils::with_timeout(timeout, async {
-            let response = Client::builder(TokioExecutor::new())
-                .build_http()
+            let response = crate::client::client()
                 .request(request)
                 .await?
                 .err_if_not_200()?;
@@ -204,7 +262,7 @@ impl Service {
             return Err(UPnPError::from_fault_node(response)?.into());
         }
 
-        let values: HashMap<_, _> = response
+        let values = response
             .children()
             .filter(Node::is_element)
             .filter_map(|node| -> Option<(String, String)> {
@@ -213,7 +271,7 @@ impl Service {
             })
             .collect();
 
-        Ok(values)
+        Ok(ActionResponse::from_entries(values))
     }
 
     #[cfg(feature = "subscribe")]
@@ -223,9 +281,6 @@ impl Service {
         callback: &str,
         timeout_secs: u32,
     ) -> Result<String> {
-        use bytes::Bytes;
-        use http_body_util::Empty;
-
         let event_sub_url = self
             .event_sub_url(url)
             .ok_or(Error::EventSubscriptionNotSupported)?;
@@ -236,12 +291,11 @@ impl Service {
             .header("CALLBACK", format!("<{callback}>"))
             .header("NT", "upnp:event")
             .header("TIMEOUT", format!("Second-{timeout_secs}"))
-            .body(Empty::<Bytes>::new())
+            .body(crate::client::empty_body())
             .expect("infallible");
 
         let response = utils::with_timeout(crate::DEFAULT_TIMEOUT, async {
-            let response = Client::builder(TokioExecutor::new())
-                .build_http()
+            let response = crate::client::client()
                 .request(req)
                 .await?
                 .err_if_not_200()?;
@@ -355,12 +409,11 @@ impl Service {
             .method("SUBSCRIBE")
             .header("SID", sid)
             .header("TIMEOUT", format!("Second-{timeout_secs}"))
-            .body(Empty::<Bytes>::new())
+            .body(crate::client::empty_body())
             .expect("infallible");
 
         utils::with_timeout(crate::DEFAULT_TIMEOUT, async {
-            Client::builder(TokioExecutor::new())
-                .build_http()
+            crate::client::client()
                 .request(req)
                 .await?
                 .err_if_not_200()?;
@@ -384,12 +437,11 @@ impl Service {
             .uri(event_sub_url)
             .method("UNSUBSCRIBE")
             .header("SID", sid)
-            .body(Empty::<Bytes>::new())
+            .body(crate::client::empty_body())
             .expect("infallible");
 
         utils::with_timeout(crate::DEFAULT_TIMEOUT, async {
-            Client::builder(TokioExecutor::new())
-                .build_http()
+            crate::client::client()
                 .request(req)
                 .await?
                 .err_if_not_200()?;

@@ -22,6 +22,10 @@ pub enum Error {
     EventSubscriptionNotSupported,
     /// The device did not respond within the configured timeout.
     Timeout,
+    /// The response of an action does not contain the requested argument.
+    MissingArgument(String),
+    /// The renderer did not reach the expected state in time.
+    StateNotReached(String),
 }
 impl Error {
     pub fn invalid_response<E: std::error::Error + Send + Sync + 'static>(err: E) -> Error {
@@ -62,6 +66,12 @@ impl fmt::Display for Error {
                 "the service does not provide an `eventSubURL` and cannot be subscribed to"
             ),
             Error::Timeout => write!(f, "the device did not respond in time"),
+            Error::MissingArgument(name) => {
+                write!(f, "the response does not contain the argument `{name}`")
+            }
+            Error::StateNotReached(state) => {
+                write!(f, "the renderer did not reach the state `{state}`")
+            }
         }
     }
 }
