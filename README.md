@@ -12,12 +12,12 @@ Spec:
 
 # Documentation
 
-| 鏂囨。 | 鍐呭 |
+| 文档 | 内容 |
 |---|---|
-| [doc/README.md](doc/README.md) | 鏂囨。绱㈠紩涓庡揩閫熶笂鎵?|
-| [doc/architecture.md](doc/architecture.md) | 鏋舵瀯锛氭ā鍧楀垎灞傘€佹暟鎹祦銆乁RL 瑙ｆ瀽妯″瀷銆侀敊璇笌瓒呮椂妯″瀷 |
-| [doc/usage.md](doc/usage.md) | 浣跨敤鏂规硶锛氬叏閮ㄥ叕寮€ API 璇存槑 |
-| [doc/use-cases.md](doc/use-cases.md) | 鐢ㄤ緥锛氬眬鍩熺綉鎶曞睆銆佺姸鎬佹煡璇€佷簨浠跺悓姝ャ€佽嚜瀹氫箟 action |
+| [doc/README.md](doc/README.md) | 文档索引与快速上手 |
+| [doc/architecture.md](doc/architecture.md) | 架构：模块分层、数据流、URL 解析模型、错误与超时模型 |
+| [doc/usage.md](doc/usage.md) | 使用方法：全部公开 API 说明 |
+| [doc/use-cases.md](doc/use-cases.md) | 用例：局域网投屏、投文档、状态查询、事件同步、自定义 action |
 
 # Example usage:
 The following code searches for devices that have a `RenderingControl` service 

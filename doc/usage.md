@@ -1,17 +1,18 @@
-# 浣跨敤鏂规硶
+# 使用方法
 
-鏈枃瑕嗙洊鍏ㄩ儴鍏紑 API銆傜ず渚嬮粯璁?`use futures::prelude::*;`锛堜负浜?`try_next`锛変笌
-`use std::time::Duration;`銆?
+本文覆盖全部公开 API。示例默认 `use futures::prelude::*;`（为了 `try_next`）与
+`use std::time::Duration;`。
+
 ---
 
-## 1. 鍙戠幇璁惧
+## 1. 发现设备
 
 ```rust
 use futures::prelude::*;
 use rupnp::ssdp::{SearchTarget, URN};
 use std::time::Duration;
 
-// 鎼滅储鎵€鏈夋牴璁惧
+// 搜索所有根设备
 let devices = rupnp::discover(&SearchTarget::RootDevice, Duration::from_secs(3), None).await?;
 let mut devices = std::pin::pin!(devices);
 
@@ -20,31 +21,40 @@ while let Some(device) = devices.try_next().await? {
 }
 ```
 
-`discover` 杩斿洖鐨勬槸娴侊紝蹇呴』 `pin` 浣忔墠鑳?`try_next`銆?
-### 鎼滅储鐗瑰畾绫诲瀷鐨勬湇鍔?
-姣旀悳鏍硅澶囨洿绮惧噯锛屼篃鏇村揩锛?
+`discover` 返回的是流，必须 `pin` 住才能 `try_next`。
+
+### 搜索特定类型的服务
+
+比搜根设备更精准，也更快：
+
 ```rust
 const AV_TRANSPORT: URN = URN::service("schemas-upnp-org", "AVTransport", 1);
 
-// 娉ㄦ剰锛歋earchTarget::URN(...) 鏄嚱鏁拌皟鐢紝浼氫骇鐢熶复鏃跺€笺€?// discover 杩斿洖鐨勬祦鍊熺敤浜嗗畠锛屾墍浠ュ繀椤诲厛缁戝畾鍒板彉閲忥紝鍚﹀垯缂栬瘧涓嶈繃銆?let search_target = SearchTarget::URN(AV_TRANSPORT);
+// 注意：SearchTarget::URN(...) 是函数调用，会产生临时值。
+// discover 返回的流借用了它，所以必须先绑定到变量，否则编译不过。
+let search_target = SearchTarget::URN(AV_TRANSPORT);
 let devices = rupnp::discover(&search_target, Duration::from_secs(3), None).await?;
 ```
 
-> `SearchTarget::RootDevice` 鏄父閲忥紝鍙互鐩存帴鍐?`&SearchTarget::RootDevice`銆?
-### 鍙傛暟
+> `SearchTarget::RootDevice` 是常量，可以直接写 `&SearchTarget::RootDevice`。
+
+### 参数
 
 ```rust
 pub async fn discover(
     search_target: &SearchTarget,
-    timeout: Duration,      // SSDP 鎼滅储鏃堕暱
-    ttl: Option<u32>,       // 鏀捐繘 M-SEARCH 鐨?TTL 瀛楁
+    timeout: Duration,      // SSDP 搜索时长
+    ttl: Option<u32>,       // 放进 M-SEARCH 的 TTL 字段
 ) -> Result<impl Stream<Item = Result<Device>>>
 ```
 
-`ttl` 鏄?SSDP 鎶ユ枃鐨?TTL锛堢锛夛紝鏈変簺璁惧浼氭嵁姝ゅ喅瀹氬洖澶嶅嚑涓寘銆?
-### 椤哄甫璇诲彇鎵╁睍灞炴€?
-`full_device_spec` feature 鍙毚闇插浐瀹氱殑涓€鎵瑰瓧娈点€備换鎰忓睘鎬х敤
-`discover_with_properties`锛?
+`ttl` 是 SSDP 报文的 TTL（秒），有些设备会据此决定回复几个包。
+
+### 顺带读取扩展属性
+
+`full_device_spec` feature 只暴露固定的一批字段。任意属性用
+`discover_with_properties`：
+
 ```rust
 let devices = rupnp::discover_with_properties(
     &SearchTarget::RootDevice,
@@ -59,12 +69,15 @@ while let Some(device) = devices.try_next().await? {
 }
 ```
 
-> 娉ㄦ剰 `Device` 閫氳繃 `Deref` 鎸囧悜 `DeviceSpec`锛屾墍浠?`device.get_extra_property(...)`
-> 鐩存帴鍙敤銆?
+> 注意 `Device` 通过 `Deref` 指向 `DeviceSpec`，所以 `device.get_extra_property(...)`
+> 直接可用。
+
 ---
 
-## 2. 宸茬煡 URL 鐩存帴璇昏澶?
-SSDP 鏈夋椂涓嶅彲鐢紙缁勬挱琚銆佽澶囦笉鏀寔 M-SEARCH锛夛紝杩欐椂鐩存帴鎷挎弿杩?URL锛?
+## 2. 已知 URL 直接读设备
+
+SSDP 有时不可用（组播被禁、设备不支持 M-SEARCH），这时直接拿描述 URL：
+
 ```rust
 use rupnp::{http::Uri, Device};
 
@@ -74,7 +87,8 @@ let device = Device::from_url(url.clone()).await?;
 println!("{}", device.friendly_name());
 ```
 
-甯﹁秴鏃跺拰鎵╁睍灞炴€х殑鍙樹綋锛?
+带超时和扩展属性的变体：
+
 ```rust
 let device = Device::from_url_with_timeout(url.clone(), Duration::from_secs(5)).await?;
 let device = Device::from_url_and_properties(url.clone(), &["manufacturer"]).await?;
@@ -85,35 +99,42 @@ let device = Device::from_url_and_properties_with_timeout(
 ).await?;
 ```
 
-> `Uri` 涓嶆槸 `Copy`锛屽娆¤皟鐢ㄩ渶瑕?`url.clone()`銆?
+> `Uri` 不是 `Copy`，多次调用需要 `url.clone()`。
+
 ---
 
-## 3. 璁惧鎻忚堪涓庤澶囨爲
+## 3. 设备描述与设备树
 
-`Device` = 鎻忚堪 URL + 璁惧鎻忚堪鍐呭銆傚唴瀹瑰湪 `DeviceSpec` 閲岋紝`Device` 閫氳繃
-`Deref` 鏆撮湶瀹冦€?
+`Device` = 描述 URL + 设备描述内容。内容在 `DeviceSpec` 里，`Device` 通过
+`Deref` 暴露它。
+
 ```rust
-device.device_type()        // &URN锛岃澶囩被鍨?device.friendly_name()      // &str
+device.device_type()        // &URN，设备类型
+device.friendly_name()      // &str
 device.get_extra_property("manufacturer")   // Option<&str>
 ```
 
-### 閬嶅巻瀛愯澶囦笌鏈嶅姟
+### 遍历子设备与服务
 
 ```rust
-// 鐩存帴瀛愯澶?/ 鐩存帴鏈嶅姟
+// 直接子设备 / 直接服务
 device.devices()      // &Vec<DeviceSpec>
 device.services()     // &Vec<Service>
 
-// 閫掑綊閬嶅巻鎵€鏈夊眰绾?device.devices_iter()  // impl Iterator<Item = &DeviceSpec>
+// 递归遍历所有层级
+device.devices_iter()  // impl Iterator<Item = &DeviceSpec>
 device.services_iter() // impl Iterator<Item = &Service>
 
-// 鎸夌被鍨嬫煡鎵?device.find_service(&URN::service("schemas-upnp-org", "AVTransport", 1))
+// 按类型查找
+device.find_service(&URN::service("schemas-upnp-org", "AVTransport", 1))
 device.find_device(&URN::device("schemas-upnp-org", "MediaRenderer", 1))
 ```
 
-`find_service` / `find_device` 閮芥槸**閫掑綊**鐨勶紝浼氭悳鍒板瓙璁惧閲岀殑銆?
-### 瀹屾暣璁惧瀛楁锛坄full_device_spec` feature锛?
-鍚敤鍚庨澶栧彲鐢細
+`find_service` / `find_device` 都是**递归**的，会搜到子设备里的。
+
+### 完整设备字段（`full_device_spec` feature）
+
+启用后额外可用：
 
 ```rust
 device.manufacturer()        // &str
@@ -130,9 +151,10 @@ device.presentation_url()    // Option<&str>
 
 ---
 
-## 4. 璋冪敤 action
+## 4. 调用 action
 
-鎵€鏈?action 鐨勮皟鐢ㄦ柟寮忛兘涓€鏍凤細鏈嶅姟 + 鐩爣 URL + action 鍚?+ 鍙傛暟鐗囨銆?
+所有 action 的调用方式都一样：服务 + 目标 URL + action 名 + 参数片段。
+
 ```rust
 let service = device.find_service(&AV_TRANSPORT).unwrap();
 
@@ -142,10 +164,13 @@ let response = service.action(device.url(), "SetAVTransportURI", args).await?;
 println!("{:?}", response);
 ```
 
-杩斿洖鐨勬槸 `HashMap<String, String>`锛岄敭鏄?action 鐨勮緭鍑哄弬鏁板悕銆?
-### 鍙傛暟椤哄簭
+返回的是 `HashMap<String, String>`，键是 action 的输出参数名。
 
-**鍙傛暟鐗囨蹇呴』鎸夋湇鍔℃弿杩帮紙SCPD锛夐噷 `argumentList` 鐨勯『搴忔嫾鎺?*锛岃繖鏄?UPnP 鐨勭‖鎬ц姹傘€?鍙互鍏堢敤 `scpd()` 璇诲嚭鍙傛暟椤哄簭锛?
+### 参数顺序
+
+**参数片段必须按服务描述（SCPD）里 `argumentList` 的顺序拼接**，这是 UPnP 的硬性要求。
+可以先用 `scpd()` 读出参数顺序：
+
 ```rust
 let scpd = service.scpd(device.url()).await?;
 for action in scpd.actions() {
@@ -159,8 +184,9 @@ for action in scpd.actions() {
 }
 ```
 
-### 杞箟鍙傛暟鍊?
-**payload 鏄師鏍锋嫾杩?SOAP Body 鐨勶紝搴撲笉鏇夸綘杞箟銆?* 鍚?`&` `<` `>` 鐨勫€煎繀椤昏嚜宸卞鐞嗭細
+### 转义参数值
+
+**payload 是原样拼进 SOAP Body 的，库不替你转义。** 含 `&` `<` `>` 的值必须自己处理：
 
 ```rust
 use rupnp::xml::escape_text;
@@ -172,10 +198,12 @@ let args = format!(
 );
 ```
 
-`escape_text` 鐢ㄤ簬鍏冪礌鍐呭锛宍escape_attr` 鐢ㄤ簬灞炴€у€硷紙棰濆澶勭悊寮曞彿涓庣┖鐧藉瓧绗︼級銆?
-### 绫诲瀷鍖栥€佷繚搴忕殑鍝嶅簲
+`escape_text` 用于元素内容，`escape_attr` 用于属性值（额外处理引号与空白字符）。
 
-`HashMap` 涓㈠け鍙傛暟椤哄簭锛屼篃娌℃湁绫诲瀷銆傜敤 `action_ordered`锛?
+### 类型化、保序的响应
+
+`HashMap` 丢失参数顺序，也没有类型。用 `action_ordered`：
+
 ```rust
 let response = service.action_ordered(device.url(), "GetPositionInfo", args).await?;
 
@@ -183,26 +211,29 @@ let track: u32 = response.get_u32("Track")?;
 let rel_time = response.get("RelTime").unwrap_or_default();
 let playing = response.get_bool("Enabled")?;
 
-// 淇濆簭閬嶅巻
+// 保序遍历
 for (name, value) in response.iter() {
     println!("{name} = {value}");
 }
 ```
 
-`ActionResponse` 鎻愪緵 `get` / `get_u32` / `get_i32` / `get_f32` / `get_bool` /
-`iter` / `len` / `is_empty` / `into_map`銆傜己鍙傛暟鏃?`get_u32` 涔嬬被杩斿洖
-`Error::MissingArgument`銆?
-### 瓒呮椂鍙樹綋
+`ActionResponse` 提供 `get` / `get_u32` / `get_i32` / `get_f32` / `get_bool` /
+`iter` / `len` / `is_empty` / `into_map`。缺参数时 `get_u32` 之类返回
+`Error::MissingArgument`。
+
+### 超时变体
 
 ```rust
 service.action_with_timeout(url, "GetVolume", args, Duration::from_secs(5)).await?;
 service.action_ordered_with_timeout(url, "GetPositionInfo", args, Duration::from_secs(5)).await?;
 ```
 
-榛樿瓒呮椂鏄?`rupnp::DEFAULT_TIMEOUT`锛?0 绉掞級銆?
+默认超时是 `rupnp::DEFAULT_TIMEOUT`（30 秒）。
+
 ---
 
-## 5. 璇诲彇鏈嶅姟鎻忚堪锛圫CPD锛?
+## 5. 读取服务描述（SCPD）
+
 ```rust
 let scpd = service.scpd(device.url()).await?;
 
@@ -211,21 +242,24 @@ scpd.state_variables();     // &[Rc<StateVariable>]
 scpd.actions();            // &[Action]
 ```
 
-`Action`锛?
+`Action`：
+
 ```rust
 action.name()              // &String
 action.input_arguments()   // impl Iterator<Item = &Argument>
 action.output_arguments()  // impl Iterator<Item = &Argument>
 ```
 
-`Argument`锛?
+`Argument`：
+
 ```rust
 arg.name()                     // &str
 arg.is_input() / arg.is_output()
 arg.related_state_variable()   // &Rc<StateVariable>
 ```
 
-`StateVariable`锛?
+`StateVariable`：
+
 ```rust
 sv.name()            // &str
 sv.kind()            // &StateVariableKind
@@ -235,20 +269,26 @@ sv.sends_events()    // bool
 sv.is_multicast()    // bool
 ```
 
-`StateVariableKind`锛?
+`StateVariableKind`：
+
 ```rust
-StateVariableKind::Simple(DataType)   // ui1 / i4 / String / Uri 鈥?StateVariableKind::Enum(Vec<String>)   // 鏋氫妇鍙€夊€?StateVariableKind::Range(StateVariableRange)
+StateVariableKind::Simple(DataType)   // ui1 / i4 / String / Uri …
+StateVariableKind::Enum(Vec<String>)   // 枚举可选值
+StateVariableKind::Range(StateVariableRange)
 ```
 
-`DataType` 鏄?UPnP 瀹氫箟鐨勬暟鎹被鍨嬫灇涓撅紙`ui1` `ui2` `ui4` `ui8` `i1` `i2` `i4` `int`
+`DataType` 是 UPnP 定义的数据类型枚举（`ui1` `ui2` `ui4` `ui8` `i1` `i2` `i4` `int`
 `r4` `r8` `Number` `Float` `Fixed14_4` `Char` `String` `Date` `DateTime` `DateTimeTz`
-`Time` `TimeTz` `Boolean` `BinBase64` `BinHex` `Uri`锛夈€?
-甯﹁秴鏃剁殑鐗堟湰锛歚service.scpd_with_timeout(url, Duration::from_secs(5)).await?`銆?
+`Time` `TimeTz` `Boolean` `BinBase64` `BinHex` `Uri`）。
+
+带超时的版本：`service.scpd_with_timeout(url, Duration::from_secs(5)).await?`。
+
 ---
 
-## 6. 浜嬩欢璁㈤槄
+## 6. 事件订阅
 
-闇€瑕?`subscribe` feature锛堥粯璁ゅ紑鍚級銆?
+需要 `subscribe` feature（默认开启）。
+
 ```rust
 let (sid, mut stream) = service.subscribe(device.url(), 300).await?;
 
@@ -259,27 +299,34 @@ while let Some(state_vars) = stream.try_next().await? {
 }
 ```
 
-- `timeout_secs` 鏄斁杩?`SUBSCRIBE` 璇锋眰鐨?`TIMEOUT` 澶达紙`Second-300`锛夛紝
-  璁惧浼氬湪杩欎釜鏃堕棿鍚庨噸鏂板彂鍒濆浜嬩欢
-- 杩斿洖鐨?`sid` 鐢ㄤ簬缁鍜岄€€璁?
-### 缁涓庨€€璁?
+- `timeout_secs` 是放进 `SUBSCRIBE` 请求的 `TIMEOUT` 头（`Second-300`），
+  设备会在这个时间后重新发初始事件
+- 返回的 `sid` 用于续订和退订
+
+### 续订与退订
+
 ```rust
 service.renew_subscription(device.url(), &sid, 300).await?;
 service.unsubscribe(device.url(), &sid).await?;
 ```
 
-### 璁惧涓嶆敮鎸佽闃?
-鏈変簺璁惧涓嶆彁渚?`eventSubURL`銆傝繖鏃舵湇鍔′緷鐒惰兘姝ｅ父瑙ｆ瀽鍜屼娇鐢紝鍙槸涓嶈兘璁㈤槄锛?
+### 设备不支持订阅
+
+有些设备不提供 `eventSubURL`。这时服务依然能正常解析和使用，只是不能订阅：
+
 ```rust
 if !service.supports_events() {
-    println!("璇ユ湇鍔′笉鏀寔浜嬩欢璁㈤槄");
+    println!("该服务不支持事件订阅");
 }
 ```
 
-寮鸿璁㈤槄浼氬緱鍒?`Error::EventSubscriptionNotSupported`銆?
-### 澶氱綉鍗℃満鍣細鎸囧畾鍥炶皟鍦板潃
+强行订阅会得到 `Error::EventSubscriptionNotSupported`。
 
-浜嬩欢鏄潬璁惧**鍙嶅悜鍥炶皟**鏈満閫佽繃鏉ョ殑锛屾墍浠ュ洖璋?IP 蹇呴』鏄澶囪兘璁块棶鍒扮殑銆?鑷姩閫夋嫨浼氫紭鍏堟寫涓庤澶囧悓缃戞鐨勭綉鍗★紝浣嗗湪 VPN / 铏氭嫙缃戝崱寰堝鐨勭幆澧冧笅浠嶅彲鑳介€夐敊锛?
+### 多网卡机器：指定回调地址
+
+事件是靠设备**反向回调**本机送过来的，所以回调 IP 必须是设备能访问到的。
+自动选择会优先挑与设备同网段的网卡，但在 VPN / 虚拟网卡很多的环境下仍可能选错：
+
 ```rust
 use std::net::IpAddr;
 
@@ -289,7 +336,8 @@ let (sid, mut stream) = service
     .await?;
 ```
 
-鎯崇湅鏈満鏈夊摢浜涘彲鐢ㄥ湴鍧€锛?
+想看本机有哪些可用地址：
+
 ```rust
 for ip in rupnp::utils::get_local_addrs()? {
     println!("{ip}");
@@ -298,7 +346,7 @@ for ip in rupnp::utils::get_local_addrs()? {
 
 ---
 
-## 7. XML 杞箟
+## 7. XML 转义
 
 ```rust
 use rupnp::xml::{escape_attr, escape_text};
@@ -307,12 +355,15 @@ escape_text("Fish & Chips <b>")   // "Fish &amp; Chips &lt;b&gt;"
 escape_attr("a \"quote\"")        // "a &quot;quote&quot;"
 ```
 
-`escape_text` 棰濆鎶婂洖杞﹁浆鎴?`&#xD;`锛圶ML 瑙ｆ瀽鍣ㄤ細鎶婂瓧闈㈠洖杞﹀綊涓€鍖栨垚鎹㈣锛夛紝
-`escape_attr` 棰濆澶勭悊鍒惰〃 / 鎹㈣ / 鍥炶溅锛堝睘鎬у€煎綊涓€鍖栵級銆?
+`escape_text` 额外把回车转成 `&#xD;`（XML 解析器会把字面回车归一化成换行），
+`escape_attr` 额外处理制表 / 换行 / 回车（属性值归一化）。
+
 ---
 
-## 8. DIDL-Lite 鍏冩暟鎹?
-DLNA 娓叉煋鍣ㄩ渶瑕?DIDL-Lite 鏉ユ樉绀哄獟浣撴爣棰樸€?
+## 8. DIDL-Lite 元数据
+
+DLNA 渲染器需要 DIDL-Lite 来显示媒体标题。
+
 ```rust
 use rupnp::didl::{class, Didl, DidlItem, DidlResource};
 
@@ -327,7 +378,7 @@ let didl = Didl::new()
             .resource(
                 DidlResource::new(
                     "http-get:*:video/mp4:*",    // protocolInfo
-                    "http://h/movie.mp4",         // 濯掍綋鍦板潃
+                    "http://h/movie.mp4",         // 媒体地址
                 )
                 .size(12_345_678)
                 .duration("0:10:34.000"),
@@ -336,24 +387,25 @@ let didl = Didl::new()
     .to_xml();
 ```
 
-### 甯哥敤椤?
-| `DidlItem` | 璇存槑 |
+### 常用项
+
+| `DidlItem` | 说明 |
 |---|---|
-| `id` / `parent_id` / `restricted` | 閫氱敤灞炴€э紝榛樿 `"0"` / `"-1"` / `true` |
+| `id` / `parent_id` / `restricted` | 通用属性，默认 `"0"` / `"-1"` / `true` |
 | `title` | `dc:title` |
-| `class` | `upnp:class`锛岀敤 `didl::class::*` 甯搁噺 |
+| `class` | `upnp:class`，用 `didl::class::*` 常量 |
 | `creator` | `dc:creator` |
 | `album_art_uri` | `upnp:albumArtURI` |
-| `resource` | 鍔犱竴涓?`res` 鍏冪礌 |
-| `element` | 鍔犱换鎰忓厓绱狅紝瑙佷笅 |
+| `resource` | 加一个 `res` 元素 |
+| `element` | 加任意元素，见下 |
 
-| `DidlResource` | 璇存槑 |
+| `DidlResource` | 说明 |
 |---|---|
-| `new(protocol_info, uri)` | 蹇呭～鐨勪袱涓睘鎬?|
-| `duration` / `size` / `resolution` / `bitrate` | 甯哥敤鍙€夊睘鎬?|
-| `attribute(name, value)` | 浠绘剰灞炴€?|
+| `new(protocol_info, uri)` | 必填的两个属性 |
+| `duration` / `size` / `resolution` / `bitrate` | 常用可选属性 |
+| `attribute(name, value)` | 任意属性 |
 
-`didl::class` 鎻愪緵鐨勫父閲忥細
+`didl::class` 提供的常量：
 
 ```
 VIDEO           object.item.videoItem
@@ -363,7 +415,8 @@ AUDIO_RECORDING object.item.audioItem.audioRecording
 IMAGE           object.item.imageItem.photo
 ```
 
-### 浠绘剰鍛藉悕绌洪棿鐨勫厓绱?
+### 任意命名空间的元素
+
 ```rust
 use rupnp::didl::{DidlElement, Namespace};
 
@@ -374,18 +427,22 @@ DidlItem::new().element(DidlElement::new(
 ))
 ```
 
-`Namespace` 鏋氫妇闄愬畾浜嗗彲鐢ㄧ殑鍓嶇紑锛坄Dc` / `Upnp` / `Dlna` / `Sec`锛夛紝
-閬垮厤鎷奸敊鍛藉悕绌洪棿銆?
-### 杈撳嚭褰㈠紡
+`Namespace` 枚举限定了可用的前缀（`Dc` / `Upnp` / `Dlna` / `Sec`），
+避免拼错命名空间。
+
+### 输出形式
 
 ```rust
-didl.to_xml()           // 鍙祵鍏ュ叾瀹冩枃妗ｇ殑鐗囨锛堟棤 xml 澹版槑锛?didl.to_xml_document()  // 甯?xml 澹版槑鐨勭嫭绔嬫枃妗?```
+didl.to_xml()           // 可嵌入其它文档的片段（无 xml 声明）
+didl.to_xml_document()  // 带 xml 声明的独立文档
+```
 
 ---
 
-## 9. AVTransport锛堟姇灞忥級
+## 9. AVTransport（投屏）
 
-`rupnp::avtransport` 鎶?AVTransport 鏈嶅姟鐨勫父鐢ㄥ姩浣滃皝瑁呮垚浜嗗己绫诲瀷 API銆?
+`rupnp::avtransport` 把 AVTransport 服务的常用动作封装成了强类型 API。
+
 ```rust
 use rupnp::avtransport::Cast;
 
@@ -399,15 +456,17 @@ cast.stop().await?;                                        // Stop
 cast.seek(SeekUnit::RelTime, "0:01:30").await?;            // Seek
 ```
 
-### 璇荤姸鎬?
+### 读状态
+
 ```rust
 let state = cast.state().await?;                  // TransportState
 let info = cast.transport_info().await?;          // TransportInfo
 let position = cast.position_info().await?;       // PositionInfo
 ```
 
-`TransportState`锛?
-| 鍙樹綋 | 璁惧涓婃姤鐨勫€?|
+`TransportState`：
+
+| 变体 | 设备上报的值 |
 |---|---|
 | `Idle` | `IDLE` |
 | `Loading` | `LOADING` |
@@ -417,22 +476,29 @@ let position = cast.position_info().await?;       // PositionInfo
 | `Transitioning` | `TRANSITIONING` |
 | `Buffering` | `STREAMING_BUFFERING` |
 | `NoMedia` | `NO_MEDIA_PRESENT` |
-| `Unknown` | 鍏跺畠 |
+| `Unknown` | 其它 |
 
-`state.is_playing()` 鏄究鎹峰垽鏂€?
-`PositionInfo` 瀛楁锛歚track` / `track_duration` / `track_meta_data` / `track_uri` /
-`rel_time` / `abs_time` / `rel_count` / `abs_count`銆?`position_info.duration()` 涓?`position_info.position()` 浼氭妸 UPnP 鐨?`H+:MM:SS.F+` 鏍煎紡瑙ｆ瀽鎴?`std::time::Duration`銆?
-### 绛夊緟鐘舵€?
+`state.is_playing()` 是便捷判断。
+
+`PositionInfo` 字段：`track` / `track_duration` / `track_meta_data` / `track_uri` /
+`rel_time` / `abs_time` / `rel_count` / `abs_count`。
+`position_info.duration()` 与 `position_info.position()` 会把 UPnP 的
+`H+:MM:SS.F+` 格式解析成 `std::time::Duration`。
+
+### 等待状态
+
 ```rust
 use std::time::Duration;
 
 cast.wait_for_state(TransportState::Playing, Duration::from_secs(10)).await?;
 ```
 
-瓒呮椂杩斿洖 `Error::StateNotReached`銆?
-### 鎵嬪姩鎷?payload
+超时返回 `Error::StateNotReached`。
 
-闇€瑕佹湰搴撴病灏佽鐨勫姩浣滄椂锛岀敤杩欎簺鑷敱鍑芥暟锛?
+### 手动拼 payload
+
+需要本库没封装的动作时，用这些自由函数：
+
 ```rust
 use rupnp::avtransport;
 
@@ -445,7 +511,7 @@ avtransport::seek_payload(0, "REL_TIME", "0:01:30");
 
 ---
 
-## 10. 閿欒澶勭悊
+## 10. 错误处理
 
 ```rust
 use rupnp::Error;
@@ -453,34 +519,37 @@ use rupnp::Error;
 match service.action(device.url(), "GetVolume", args).await {
     Ok(response) => { /* ... */ }
     Err(Error::UPnPError(err)) => {
-        // 璁惧杩斿洖浜?SOAP Fault
-        eprintln!("璁惧鎷掔粷: {} ({})", err.err_code(), err.err_code_description());
+        // 设备返回了 SOAP Fault
+        eprintln!("设备拒绝: {} ({})", err.err_code(), err.err_code_description());
     }
     Err(Error::HttpErrorCode(code)) => eprintln!("HTTP {code}"),
-    Err(Error::Timeout) => eprintln!("璁惧鏃犲搷搴?),
-    Err(err) => eprintln!("鍏跺畠閿欒: {err}"),
+    Err(Error::Timeout) => eprintln!("设备无响应"),
+    Err(err) => eprintln!("其它错误: {err}"),
 }
 ```
 
-`Error` 鏄?`#[non_exhaustive]`锛屽尮閰嶆椂闇€瑕佸厹搴曞垎鏀€?
-璁惧杩斿洖 SOAP Fault 鏃讹紝`err_code()` 缁欏嚭 UPnP 鏍囧噯閿欒鐮侊紝
-`err_code_description()` 缁欏嚭鍙鎻忚堪锛?01/402/501/600/601/602 鈥︼級銆?
+`Error` 是 `#[non_exhaustive]`，匹配时需要兜底分支。
+
+设备返回 SOAP Fault 时，`err_code()` 给出 UPnP 标准错误码，
+`err_code_description()` 给出可读描述（401/402/501/600/601/602 …）。
+
 ---
 
 ## 11. Feature flags
 
 ```toml
 [dependencies]
-rupnp = "3"                                    # 榛樿鍚?subscribe
+rupnp = "3"                                    # 默认含 subscribe
 
-rupnp = { version = "3", default-features = false }              # 涓嶅惈浜嬩欢璁㈤槄
-rupnp = { version = "3", features = ["full_device_spec"] }       # 瀹屾暣璁惧瀛楁
+rupnp = { version = "3", default-features = false }              # 不含事件订阅
+rupnp = { version = "3", features = ["full_device_spec"] }       # 完整设备字段
 ```
 
-| feature | 榛樿 | 浣滅敤 |
+| feature | 默认 | 作用 |
 |---|---|---|
-| `subscribe` | 鉁?| 浜嬩欢璁㈤槄銆傞澶栦緷璧?`genawaiter`銆乣if-addrs` |
-| `full_device_spec` | 鉂?| 鍘傚晢銆佸瀷鍙枫€乁DN 绛夊瓧娈典綔涓虹粨鏋勪綋瀛楁鏆撮湶 |
+| `subscribe` | ✅ | 事件订阅。额外依赖 `genawaiter`、`if-addrs` |
+| `full_device_spec` | ❌ | 厂商、型号、UDN 等字段作为结构体字段暴露 |
 
-涓嶄娇鐢ㄤ簨浠惰闃呮椂鍏虫帀 `subscribe` 鍙互灏戠紪璇戝嚑涓緷璧栥€?娉ㄦ剰 `subscribe` 涓?`full_device_spec` 涓嶆槸鍙姞鐨勭粍鍚堬紝
-`--no-default-features --features subscribe` 瑕佸崟鐙祴杩囥€?
+不使用事件订阅时关掉 `subscribe` 可以少编译几个依赖。
+注意 `subscribe` 与 `full_device_spec` 不是可加的组合，
+`--no-default-features --features subscribe` 要单独测过。

@@ -11,7 +11,18 @@ action、读取服务描述，以及订阅设备的状态变化事件。
 |---|---|
 | [架构](architecture.md) | 本库在 UPnP 协议栈中的位置、模块分层、数据流、URL 解析模型、错误与超时模型 |
 | [使用方法](usage.md) | 全部公开 API 的用法说明：发现、调用 action、读 SCPD、事件订阅、XML/DIDL 构造 |
-| [用例](use-cases.md) | 端到端场景：局域网投屏、设备状态查询、事件同步、自定义 action、批量发现 |
+| [用例](use-cases.md) | 端到端场景：局域网投屏、投文档、状态查询、事件同步、自定义 action |
+
+## 用例索引
+
+| # | 场景 | 难度 | 关键点 |
+|---|---|---|---|
+| 1 | [局域网投屏（DLNA Play-To）](use-cases.md#用例-1局域网投屏dlna-play-to) | 中 | 控制面本库搞定，媒体面要自己写 **支持 Range 的** HTTP 服务器 |
+| 2 | [设备状态查询与音量控制](use-cases.md#用例-2设备状态查询与音量控制) | 易 | 先读 SCPD 确认参数顺序再拼 payload |
+| 3 | [事件订阅与状态同步](use-cases.md#用例-3事件订阅与状态同步) | 中 | 记得续订；多网卡要显式指定回调 IP |
+| 4 | [调用自定义 action](use-cases.md#用例-4调用自定义-action) | 中 | 参数值要自己转义 |
+| 5 | [批量发现与设备筛选](use-cases.md#用例-5批量发现与设备筛选) | 易 | `services_iter()` / `devices_iter()` 是递归的 |
+| 6 | [投文档（PPT / Word）](use-cases.md#用例-6投文档ppt--word) | 中 | 标准 DLNA 不支持直接投，要先转成图片或视频 |
 
 ## 三十秒上手
 
