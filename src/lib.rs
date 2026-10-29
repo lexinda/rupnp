@@ -58,6 +58,8 @@ mod device;
 pub mod didl;
 mod discovery;
 mod error;
+/// 检查与修复 MP4 的 atom 布局，使其适合 HTTP Range 播放。
+pub mod mp4_tool;
 /// Service Control Protocol Description.
 pub mod scpd;
 mod service;

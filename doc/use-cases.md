@@ -733,10 +733,10 @@ MP4 的顶层结构是若干 atom：
   也不知道编码是什么**，必须把整个文件下载完才能读到末尾的 moov →
   2GB 的文件就要等下载完 2GB 才能播 → **表现为一直转圈或直接超时失败**
 
-诊断工具（仓库里的 `tools/mp4-tool`，纯 Rust 实现）：
+诊断工具（仓库里的 `mp4-tool`，纯 Rust 实现，在 `src/bin/` 下）：
 
 ```bash
-cargo run -p mp4-tool -- check movie.mp4
+cargo run --bin mp4-tool -- check movie.mp4
 ```
 
 ```
@@ -756,24 +756,35 @@ cargo run -p mp4-tool -- check movie.mp4
 **修复**：
 
 ```bash
-cargo run -p mp4-tool -- fix movie.mp4
+cargo run --bin mp4-tool -- fix movie.mp4
 ```
 
 它会调 ffmpeg 做 `-c copy -movflags +faststart`，**不重编码、画质无损**，
 结果写到 `movie.faststart.mp4`。
 
-本机没有 ffmpeg 的话会自动下载一个 —— 下载走 Rust 的 HTTP 客户端
-（`ffmpeg-sidecar` 的 ureq），**不依赖系统里有没有 curl**，下载过程会显示进度。
+### ffmpeg 从哪来
 
-国内网络直连境外下载源可能很慢甚至卡住，这时可以指定镜像：
+| 情况 | 行为 |
+|---|---|
+| 本机已有 ffmpeg | 直接用 |
+| `--ffmpeg <路径>` | 用指定的这个，不会下载 |
+| 都没指定 | **创建下载目录并下载**一个 |
+
+下载走 Rust 的 HTTP 客户端（`ffmpeg-sidecar` 用的 `ureq`），**不依赖系统里有没有
+curl**；下载过程显示进度，失败会自动重试（退避时间逐次翻倍）。
 
 ```bash
-cargo run -p mp4-tool -- fix --ffmpeg-url \
+# 用本机已有的 ffmpeg
+cargo run --bin mp4-tool -- fix --ffmpeg /usr/local/bin/ffmpeg movie.mp4
+
+# 指定下载目录
+cargo run --bin mp4-tool -- fix --ffmpeg-dir ~/.local/bin movie.mp4
+
+# 国内网络直连境外源很慢时，用镜像
+cargo run --bin mp4-tool -- fix --ffmpeg-url \
   https://gh-proxy.com/https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip \
   movie.mp4
 ```
-
-也可以用环境变量 `FFMPEG_SIDECAR_URL` 设置默认镜像。
 
 > 为什么有些文件天然就是 fast start、有些不是？因为**录制顺序不同**。
 > 相机、录屏软件边录边写，moov 只能在录制结束时才写到末尾；而经过 ffmpeg
@@ -849,3 +860,105 @@ HLS / DASH 直播用的 `moof` + `mfra` 结构，**老渲染器不认**。症状
 **能播但不能 seek**
 moov 正常但 `stss` 缺失，或关键帧全是 P 帧 —— 表现为能播，拖进度条就卡死
 或跳回开头。
+
+---
+
+## 用例 7：媒体处理（分割 / 拼接 / 插入 / 生成空白片）
+
+`rupnp::mp4_tool::media` 把常用的 MP4 / MP3 处理封装好了，命令行在
+`src/bin/mp4-tool.rs`，底层 API 在 `src/mp4_tool/`。
+
+时间参数用 ffmpeg 的时长格式：`90`、`1:30`、`00:01:30`、`00:01:30.500` 都支持。
+
+### 7.1 分割
+
+```bash
+# 从第 30 秒开始，取 60 秒
+cargo run --bin mp4-tool -- split movie.mp4 --start 00:00:30 --duration 60
+```
+
+输出 `movie.cut.mp4`。用 `-c copy` 不重编码。
+
+```rust
+use std::path::Path;
+use rupnp::mp4_tool;
+
+let ffmpeg = mp4_tool::ensure_ffmpeg(&mp4_tool::FfmpegOptions::default())?;
+let out = mp4_tool::split(&ffmpeg, Path::new("movie.mp4"), "00:00:30", "60")?;
+```
+
+### 7.2 拼接
+
+```bash
+# 按命令行顺序拼
+cargo run --bin mp4-tool -- concat part1.mp4 part2.mp4 part3.mp4
+```
+
+输出 `part1.concat.mp4`。
+
+**要求所有输入是同一种容器和编码** —— `-c copy` 只是把数据搬过去，不做转码。
+混了不同分辨率 / 编码的文件会拼接失败，需要先用 ffmpeg 统一转一遍。
+
+```rust
+let out = mp4_tool::concat(&ffmpeg, &[
+    "part1.mp4".into(),
+    "part2.mp4".into(),
+])?;
+```
+
+### 7.3 插入
+
+```bash
+# 在第 5 分钟处插入一段广告
+cargo run --bin mp4-tool -- insert movie.mp4 --insert ad.mp4 --at 00:05:00
+```
+
+输出 `movie.inserted.mp4`。
+
+实现是「切成两段 → 拼接」，所以同样要求同一种容器和编码。
+中间产物会写到系统临时目录并自动清理。
+
+```rust
+let out = mp4_tool::insert(
+    &ffmpeg,
+    Path::new("movie.mp4"),
+    Path::new("ad.mp4"),
+    "00:05:00",
+)?;
+```
+
+### 7.4 生成黑屏视频 / 静音音频
+
+```bash
+# 4 秒黑屏视频（1280x720，带静音音轨）
+cargo run --bin mp4-tool -- blank --kind video --duration 4
+
+# 2 秒静音音频
+cargo run --bin mp4-tool -- blank --kind audio --duration 2
+```
+
+输出到系统临时目录。用途：
+
+- 给拼接的片段之间加空隙
+- 给投屏做「占位画面」
+- 测试渲染器在无内容时的表现
+
+```rust
+use rupnp::mp4_tool::media::{self, MediaKind};
+
+let out = media::blank(&ffmpeg, MediaKind::Video, "4")?;
+```
+
+### 7.5 输出与中间文件
+
+| 子命令 | 输出位置 |
+|---|---|
+| `split` | `<名字>.cut.<扩展名>`，与输入同目录 |
+| `concat` | `<第一个输入名字>.concat.<扩展名>`，与输入同目录 |
+| `insert` | `<名字>.inserted.<扩展名>`，与输入同目录 |
+| `blank` | 系统临时目录 `rupnp-blank-<pid>-<nanos>.<扩展名>` |
+
+`insert` 切出来的两段放在系统临时目录，命令结束后自动删除。
+
+> 所有操作都**不会覆盖输入文件**。同一份输入多次执行 `split` 会覆盖上一次的
+> `.cut.` 输出。

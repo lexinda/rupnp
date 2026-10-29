@@ -128,7 +128,7 @@ mod tests {
         contents.extend(atom(b"moov", &[0u8; 64]));
         contents.extend(atom(b"mdat", &[0u8; 1024]));
 
-        let path = temp_file("mp4_tool_faststart.mp4", &contents);
+        let path = temp_file("rupnp_mp4_faststart.mp4", &contents);
         let atoms = top_level_atoms(&path).unwrap();
 
         assert_eq!(atoms.len(), 3);
@@ -146,7 +146,7 @@ mod tests {
         contents.extend(atom(b"mdat", &[0u8; 1024]));
         contents.extend(atom(b"moov", &[0u8; 64]));
 
-        let path = temp_file("mp4_tool_moov_at_end.mp4", &contents);
+        let path = temp_file("rupnp_mp4_moov_at_end.mp4", &contents);
         let atoms = top_level_atoms(&path).unwrap();
 
         assert_eq!(layout(&atoms), Layout::MoovAtEnd);
@@ -156,7 +156,7 @@ mod tests {
 
     #[test]
     fn detects_non_mp4() {
-        let path = temp_file("mp4_tool_not_mp4.mp4", b"not an mp4 at all");
+        let path = temp_file("rupnp_mp4_not_mp4.mp4", b"not an mp4 at all");
         let atoms = top_level_atoms(&path).unwrap();
 
         assert_eq!(layout(&atoms), Layout::Unknown);
@@ -173,7 +173,7 @@ mod tests {
         contents.extend_from_slice(&24u64.to_be_bytes());
         contents.extend_from_slice(&[0u8; 8]);
 
-        let path = temp_file("mp4_tool_64bit.mp4", &contents);
+        let path = temp_file("rupnp_mp4_64bit.mp4", &contents);
         let atoms = top_level_atoms(&path).unwrap();
 
         assert_eq!(atoms.len(), 1);

@@ -94,12 +94,27 @@ async fn main() -> Result<(), rupnp::Error> {
 
 | 文件 | 说明 |
 |---|---|
-| [`../tools/mp4-tool/`](../tools/mp4-tool/) | 检查与修复 MP4 的 atom 布局，使其适合 HTTP Range 播放 |
+| [`../src/bin/mp4-tool.rs`](../src/bin/mp4-tool.rs) | 检查与修复 MP4 的 atom 布局，使其适合 HTTP Range 播放 |
 
 ```bash
-cargo run -p mp4-tool -- check movie.mp4   # 检查，不需要 ffmpeg
-cargo run -p mp4-tool -- fix movie.mp4     # 重新封装（自动准备 ffmpeg）
+cargo run --bin mp4-tool -- check movie.mp4   # 检查，不需要 ffmpeg
+cargo run --bin mp4-tool -- fix movie.mp4     # 重新封装（自动准备 ffmpeg）
 ```
+
+子命令一览：
+
+| 子命令 | 作用 |
+|---|---|
+| `check` | 检查 `moov` 是否在 `mdat` 之前，不需要 ffmpeg |
+| `fix` | 重新封装，把 `moov` 移到文件头（fast start） |
+| `split` | 按起点 + 时长分割 |
+| `concat` | 按顺序拼接（要求同容器同编码） |
+| `insert` | 在指定时间插入一段 |
+| `blank` | 生成黑屏视频 / 静音音频 |
+
+底层 API 在 [`../src/mp4_tool/`](../src/mp4_tool/)：
+`top_level_atoms` / `layout` / `ensure_ffmpeg` / `remux`，
+以及 `media::split` / `media::concat` / `media::insert` / `media::blank`。
 
 > examples 是**手工验证工具**，不会被 `cargo test` 执行，因为它们需要局域网里真实存在
 > UPnP 设备。可自动化跑的测试是 `cargo test` 覆盖的单元测试与文档测试。
