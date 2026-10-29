@@ -1,7 +1,6 @@
 use crate::{
-    find_in_xml,
+    Result, Service, find_in_xml,
     utils::{self, HttpResponseExt, HyperBodyExt},
-    Result, Service,
 };
 use http::Uri;
 use log::warn;
@@ -356,9 +355,10 @@ mod tests {
 
         // The broken service is skipped, the working one is still there.
         assert_eq!(spec.services().len(), 1);
-        assert!(spec
-            .find_service(&URN::service("schemas-upnp-org", "RenderingControl", 1))
-            .is_some());
+        assert!(
+            spec.find_service(&URN::service("schemas-upnp-org", "RenderingControl", 1))
+                .is_some()
+        );
 
         Ok(())
     }

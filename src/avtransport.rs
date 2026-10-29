@@ -482,7 +482,7 @@ pub fn set_uri_payload(current_uri: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::didl::{class, Didl, DidlItem, DidlResource};
+    use crate::didl::{Didl, DidlItem, DidlResource, class};
     use roxmltree::Document;
 
     fn parse(payload: &str) -> roxmltree::Document<'static> {
@@ -647,9 +647,10 @@ mod tests {
             .unwrap();
         assert_eq!(current_uri.text(), Some("http://192.168.1.10:8080/bbb.mp4"));
 
-        assert!(doc
-            .descendants()
-            .all(|n| n.tag_name().name() != "CurrentURIMetaData"));
+        assert!(
+            doc.descendants()
+                .all(|n| n.tag_name().name() != "CurrentURIMetaData")
+        );
     }
 
     #[test]

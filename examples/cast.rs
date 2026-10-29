@@ -7,7 +7,7 @@
 
 use futures::prelude::*;
 use rupnp::avtransport::Cast;
-use rupnp::didl::{class, Didl, DidlItem, DidlResource};
+use rupnp::didl::{Didl, DidlItem, DidlResource, class};
 use rupnp::ssdp::{SearchTarget, URN};
 use std::time::Duration;
 

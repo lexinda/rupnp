@@ -1,5 +1,5 @@
 use futures::prelude::*;
-use rupnp::{http::Uri, ssdp::URN, Device};
+use rupnp::{Device, http::Uri, ssdp::URN};
 use std::collections::HashMap;
 
 #[tokio::main]

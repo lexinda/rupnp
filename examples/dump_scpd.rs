@@ -1,15 +1,15 @@
 use futures::prelude::*;
 use rupnp::{
+    DeviceSpec, Error, Service,
     http::Uri,
     ssdp::{SearchTarget, URN},
-    DeviceSpec, Error, Service,
 };
 use std::{
     fs,
     path::{Path, PathBuf},
     time::Duration,
 };
-use tokio::task::{spawn, JoinHandle};
+use tokio::task::{JoinHandle, spawn};
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {

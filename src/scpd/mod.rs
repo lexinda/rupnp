@@ -1,7 +1,6 @@
 use crate::{
-    find_in_xml,
+    Error, find_in_xml,
     utils::{self, HttpResponseExt, HyperBodyExt},
-    Error,
 };
 use http::Uri;
 use roxmltree::{Document, Node};

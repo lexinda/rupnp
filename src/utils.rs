@@ -2,7 +2,7 @@ use crate::{Error, Result};
 use http::Uri;
 use http_body_util::BodyExt;
 #[cfg(feature = "subscribe")]
-use if_addrs::{get_if_addrs, IfAddr};
+use if_addrs::{IfAddr, get_if_addrs};
 use roxmltree::{Document, Node};
 #[cfg(feature = "subscribe")]
 use std::net::{IpAddr, SocketAddrV4};

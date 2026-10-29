@@ -1,4 +1,4 @@
-use crate::{find_in_xml, utils, Error, Result};
+use crate::{Error, Result, find_in_xml, utils};
 use roxmltree::Node;
 use std::fmt;
 use std::fmt::Formatter;

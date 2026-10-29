@@ -1,10 +1,10 @@
 use crate::{
+    Result,
     action::ActionResponse,
     error::{Error, UPnPError},
     find_in_xml,
     scpd::SCPD,
     utils::{self, HttpResponseExt},
-    Result,
 };
 
 use bytes::Bytes;
@@ -615,8 +615,8 @@ mod tests {
     }
 
     #[test]
-    fn relative_endpoints_are_resolved_against_the_base_url(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn relative_endpoints_are_resolved_against_the_base_url()
+    -> Result<(), Box<dyn std::error::Error>> {
         let service = service_from_xml(
             r#"
             <service>

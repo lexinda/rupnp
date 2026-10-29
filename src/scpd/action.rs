@@ -1,7 +1,7 @@
 use crate::{
-    find_in_xml,
+    Error, Result, find_in_xml,
     scpd::{StateVariable, StateVariableKind},
-    utils, Error, Result,
+    utils,
 };
 use roxmltree::Node;
 use std::{fmt, rc::Rc};
