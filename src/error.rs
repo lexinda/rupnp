@@ -3,10 +3,12 @@ use std::{fmt, str::Utf8Error};
 
 /// The UPnP Error type.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Error {
     UPnPError(UPnPError),
     SSDPError(ssdp_client::Error),
     NetworkError(hyper::Error),
+    NetworkClientError(hyper_util::client::legacy::Error),
     NoLocalInterfaceOpen,
     IO(std::io::Error),
     InvalidUrl(http::uri::InvalidUri),
@@ -26,28 +28,30 @@ impl Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::UPnPError(err) => write!(f, "{}", err),
-            Error::SSDPError(err) => write!(f, "error trying to discover devices: {}", err),
-            Error::IO(err) => write!(f, "error reading response: {}", err),
+            Error::UPnPError(err) => write!(f, "{err}"),
+            Error::SSDPError(err) => write!(f, "error trying to discover devices: {err}"),
+            Error::IO(err) => write!(f, "error reading response: {err}"),
             Error::NetworkError(err) => {
-                write!(f, "An error occurred trying to connect to device: {}", err)
+                write!(f, "An error occurred trying to connect to device: {err}")
+            }
+            Error::NetworkClientError(err) => {
+                write!(f, "An error occurred trying to connect to device: {err}")
             }
             Error::NoLocalInterfaceOpen => write!(
                 f,
                 "could not subscribe to events: no local ipv4 interface open"
             ),
-            Error::InvalidUrl(err) => write!(f, "invalid url: {}", err),
-            Error::InvalidUtf8(err) => write!(f, "invalid utf8: {}", err),
-            Error::ParseError(err) => write!(f, "{}", err),
-            Error::InvalidResponse(err) => write!(f, "Invalid response: {}", err),
+            Error::InvalidUrl(err) => write!(f, "invalid url: {err}"),
+            Error::InvalidUtf8(err) => write!(f, "invalid utf8: {err}"),
+            Error::ParseError(err) => write!(f, "{err}"),
+            Error::InvalidResponse(err) => write!(f, "Invalid response: {err}"),
             Error::HttpErrorCode(code) => {
-                write!(f, "The control point responded with status code {}", code)
+                write!(f, "The control point responded with status code {code}")
             }
-            Error::XmlError(err) => write!(f, "failed to parse xml: {}", err),
+            Error::XmlError(err) => write!(f, "failed to parse xml: {err}"),
             Error::XmlMissingElement(parent, child) => write!(
                 f,
-                "`{}` does not contain a `{}` element or attribute",
-                parent, child
+                "`{parent}` does not contain a `{child}` element or attribute"
             ),
         }
     }
@@ -69,6 +73,11 @@ impl std::error::Error for Error {
 impl From<hyper::Error> for Error {
     fn from(err: hyper::Error) -> Self {
         Error::NetworkError(err)
+    }
+}
+impl From<hyper_util::client::legacy::Error> for Error {
+    fn from(err: hyper_util::client::legacy::Error) -> Self {
+        Error::NetworkClientError(err)
     }
 }
 impl From<roxmltree::Error> for Error {

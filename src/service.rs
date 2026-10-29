@@ -6,14 +6,17 @@ use crate::{
     Result,
 };
 
+use bytes::Bytes;
 #[cfg(feature = "subscribe")]
 use futures_core::stream::Stream;
 #[cfg(feature = "subscribe")]
 use genawaiter::sync::{Co, Gen};
+use http_body_util::Empty;
+use hyper_util::{client::legacy::Client, rt::TokioExecutor};
 use log::debug;
 #[cfg(feature = "subscribe")]
 use tokio::{
-    io::{AsyncBufReadExt, BufReader},
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::TcpListener,
 };
 
@@ -45,9 +48,9 @@ impl Service {
         Ok(Self {
             service_type: utils::parse_node_text(service_type)?,
             service_id: utils::parse_node_text(service_id)?,
-            scpd_endpoint: utils::parse_node_text(scpd_endpoint)?,
-            control_endpoint: utils::parse_node_text(control_endpoint)?,
-            event_sub_endpoint: utils::parse_node_text(event_sub_endpoint)?,
+            scpd_endpoint: utils::parse_url_endpoint(scpd_endpoint)?,
+            control_endpoint: utils::parse_url_endpoint(control_endpoint)?,
+            event_sub_endpoint: utils::parse_url_endpoint(event_sub_endpoint)?,
         })
     }
 
@@ -73,7 +76,7 @@ impl Service {
 
     /// Fetches the [`SCPD`](scpd/struct.SCPD.html) of this service.
     pub async fn scpd(&self, url: &Uri) -> Result<SCPD> {
-        Ok(SCPD::from_url(&self.scpd_url(url), self.service_type().clone()).await?)
+        SCPD::from_url(&self.scpd_url(url), self.service_type().clone()).await
     }
 
     /// Execute some UPnP Action on this service.
@@ -122,73 +125,50 @@ impl Service {
                     </u:{action}>
                 </s:Body>
             </s:Envelope>"#,
-            service = &self.service_type,
+            service = self.service_type,
             action = action,
             payload = payload
         );
 
-        let soap_action = format!("\"{}#{}\"", &self.service_type, action);
-        let control_url = self.control_url(url);
-        let control_url_str = panic::catch_unwind(||{
-            let cPath = control_url.path_and_query().unwrap();
-            if(cPath.as_str().starts_with("/")){
-                control_url.scheme().unwrap().to_string()+"://"+control_url.authority().unwrap().as_str()+control_url.path_and_query().unwrap().as_str()
-            }else{
-                control_url.scheme().unwrap().to_string()+"://"+control_url.authority().unwrap().as_str()+"/"+control_url.path_and_query().unwrap().as_str()
-            }
+        let soap_action = format!("\"{}#{}\"", self.service_type, action);
 
-        });
-        match control_url_str{
-            Ok(cus)=>{
-                let request = Request::post(cus)
-                    .header("CONTENT-TYPE", "text/xml; charset=\"utf-8\"")
-                    .header("SOAPAction", soap_action)
-                    .body(body.into());
-                match request {
-                    Ok(req)=>{
-                        let doc = hyper::Client::new()
-                            .request(req)
-                            .await?
-                            .into_body()
-                            .text()
-                            .await?;
-                        let doc = std::str::from_utf8(&doc)?;
-                        debug!("Action server response: {}", doc);
+        let request = Request::post(self.control_url(url))
+            .header("CONTENT-TYPE", "text/xml; charset=\"utf-8\"")
+            .header("SOAPAction", soap_action)
+            .body(body)
+            .expect("infallible");
+        let doc = Client::builder(TokioExecutor::new())
+            .build_http()
+            .request(request)
+            .await?
+            .err_if_not_200()?
+            .into_body()
+            .bytes()
+            .await?;
+        let doc = std::str::from_utf8(&doc)?;
+        debug!("Action server response: {}", doc);
 
-                        let document = Document::parse(&doc)?;
-                        let response = utils::find_root(&document, "Body", "UPnP Response")?
-                            .first_element_child()
-                            .ok_or_else(|| {
-                                Error::XmlMissingElement("Body".to_string(), format!("{}Response", action))
-                            })?;
+        let document = Document::parse(doc)?;
+        let response = utils::find_root(&document, "Body", "UPnP Response")?
+            .first_element_child()
+            .ok_or_else(|| {
+                Error::XmlMissingElement("Body".to_string(), format!("{action}Response"))
+            })?;
 
-                        if response.tag_name().name().eq_ignore_ascii_case("Fault") {
-                            return Err(UPnPError::from_fault_node(response)?.into());
-                        }
-
-                        let values: HashMap<_, _> = response
-                            .children()
-                            .filter(Node::is_element)
-                            .filter_map(|node| -> Option<(String, String)> {
-                                if let Some(text) = node.text() {
-                                    Some((node.tag_name().name().to_string(), text.to_string()))
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect();
-
-                        Ok(values)
-                    },
-                    Err(e)=>{
-                        Ok(HashMap::new())
-                    }
-                }
-            },
-            Err(e)=>{
-                Ok(HashMap::new())
-            }
+        if response.tag_name().name().eq_ignore_ascii_case("Fault") {
+            return Err(UPnPError::from_fault_node(response)?.into());
         }
+
+        let values: HashMap<_, _> = response
+            .children()
+            .filter(Node::is_element)
+            .filter_map(|node| -> Option<(String, String)> {
+                node.text()
+                    .map(|text| (node.tag_name().name().to_string(), text.to_string()))
+            })
+            .collect();
+
+        Ok(values)
     }
 
     #[cfg(feature = "subscribe")]
@@ -198,16 +178,23 @@ impl Service {
         callback: &str,
         timeout_secs: u32,
     ) -> Result<String> {
+        use bytes::Bytes;
+        use http_body_util::Empty;
+
         let req = Request::builder()
             .uri(self.event_sub_url(url))
             .method("SUBSCRIBE")
-            .header("CALLBACK", format!("<{}>", callback))
+            .header("CALLBACK", format!("<{callback}>"))
             .header("NT", "upnp:event")
-            .header("TIMEOUT", format!("Second-{}", timeout_secs))
-            .body(hyper::Body::empty())
+            .header("TIMEOUT", format!("Second-{timeout_secs}"))
+            .body(Empty::<Bytes>::new())
             .expect("infallible");
 
-        let response = hyper::Client::new().request(req).await?.err_if_not_200()?;
+        let response = Client::builder(TokioExecutor::new())
+            .build_http()
+            .request(req)
+            .await?
+            .err_if_not_200()?;
 
         let sid = response
             .headers()
@@ -271,10 +258,14 @@ impl Service {
             .uri(self.event_sub_url(url))
             .method("SUBSCRIBE")
             .header("SID", sid)
-            .header("TIMEOUT", format!("Second-{}", timeout_secs))
-            .body(hyper::Body::empty())
+            .header("TIMEOUT", format!("Second-{timeout_secs}"))
+            .body(Empty::<Bytes>::new())
             .expect("infallible");
-        hyper::Client::new().request(req).await?.err_if_not_200()?;
+        Client::builder(TokioExecutor::new())
+            .build_http()
+            .request(req)
+            .await?
+            .err_if_not_200()?;
 
         Ok(())
     }
@@ -289,10 +280,14 @@ impl Service {
             .uri(self.event_sub_url(url))
             .method("UNSUBSCRIBE")
             .header("SID", sid)
-            .body(hyper::Body::empty())
+            .body(Empty::<Bytes>::new())
             .expect("infallible");
 
-        hyper::Client::new().request(req).await?.err_if_not_200()?;
+        Client::builder(TokioExecutor::new())
+            .build_http()
+            .request(req)
+            .await?
+            .err_if_not_200()?;
 
         Ok(())
     }
@@ -313,17 +308,14 @@ macro_rules! yield_try {
 
 #[cfg(feature = "subscribe")]
 fn propertyset_to_map(input: &str) -> Result<HashMap<String, String>, roxmltree::Error> {
-    let doc = Document::parse(&input)?;
+    let doc = Document::parse(input)?;
     let hashmap: HashMap<String, String> = doc
         .root_element() // <e:propertyset />
         .children() // <e:property />
         .filter_map(|child| child.first_element_child()) // actual tag
         .filter_map(|node| {
-            if let Some(text) = node.text() {
-                Some((node.tag_name().name().to_string(), text.to_string()))
-            } else {
-                None
-            }
+            node.text()
+                .map(|text| (node.tag_name().name().to_string(), text.to_string()))
         })
         .collect();
 
@@ -333,8 +325,8 @@ fn propertyset_to_map(input: &str) -> Result<HashMap<String, String>, roxmltree:
 #[cfg(feature = "subscribe")]
 async fn subscribe_stream(listener: TcpListener, co: Co<Result<HashMap<String, String>>>) {
     loop {
-        let (stream, _) = yield_try!(co => listener.accept().await);
-        let mut lines = BufReader::new(stream).lines();
+        let (mut stream, _) = yield_try!(co => listener.accept().await);
+        let mut lines = BufReader::new(&mut stream).lines();
 
         let mut input = String::new();
         let mut is_xml = false;
@@ -351,6 +343,9 @@ async fn subscribe_stream(listener: TcpListener, co: Co<Result<HashMap<String, S
                 break;
             };
         }
+
+        let response = "HTTP/1.1 200 OK\r\n\r\n";
+        let _ = stream.write_all(response.as_bytes()).await;
 
         let hashmap = yield_try!(co => propertyset_to_map(&input));
 

@@ -27,8 +27,8 @@
 //! #[tokio::main]
 //! async fn main() -> Result<(), rupnp::Error> {
 //!     let search_target = SearchTarget::URN(RENDERING_CONTROL);
-//!     let devices = rupnp::discover(&search_target, Duration::from_secs(3)).await?;
-//!     pin_utils::pin_mut!(devices);
+//!     let devices = rupnp::discover(&search_target, Duration::from_secs(3), None).await?;
+//!     let mut devices = std::pin::pin!(devices);
 //!
 //!     while let Some(device) = devices.try_next().await? {
 //!         let service = device
@@ -54,10 +54,10 @@ mod error;
 /// Service Control Protocol Description.
 pub mod scpd;
 mod service;
-mod utils;
+pub mod utils;
 
 pub use device::{Device, DeviceSpec};
-pub use discovery::discover;
+pub use discovery::{discover, discover_with_properties};
 pub use error::Error;
 pub use service::Service;
 
