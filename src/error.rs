@@ -18,6 +18,8 @@ pub enum Error {
     XmlError(roxmltree::Error),
     XmlMissingElement(String, String),
     InvalidResponse(Box<dyn std::error::Error + Send + Sync + 'static>),
+    /// The service does not provide an `eventSubURL` and can therefore not be subscribed to.
+    EventSubscriptionNotSupported,
 }
 impl Error {
     pub fn invalid_response<E: std::error::Error + Send + Sync + 'static>(err: E) -> Error {
@@ -52,6 +54,10 @@ impl fmt::Display for Error {
             Error::XmlMissingElement(parent, child) => write!(
                 f,
                 "`{parent}` does not contain a `{child}` element or attribute"
+            ),
+            Error::EventSubscriptionNotSupported => write!(
+                f,
+                "the service does not provide an `eventSubURL` and cannot be subscribed to"
             ),
         }
     }

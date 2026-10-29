@@ -110,6 +110,13 @@ pub fn parse_url_endpoint(node: Node<'_, '_>) -> Result<PathAndQuery> {
     normalized.parse().map_err(Error::invalid_response)
 }
 
+/// Parses an optional URL endpoint of a service (e.g. `eventSubURL`).
+///
+/// Returns `Ok(None)` if the element is not present in the device description.
+pub fn parse_optional_url_endpoint(node: Option<Node<'_, '_>>) -> Result<Option<PathAndQuery>> {
+    node.map(parse_url_endpoint).transpose()
+}
+
 pub fn find_root<'a, 'input: 'a>(
     document: &'input Document<'_>,
     element: &str,

@@ -36,21 +36,21 @@ pub struct Service {
     service_id: String,
     scpd_endpoint: PathAndQuery,
     control_endpoint: PathAndQuery,
-    event_sub_endpoint: PathAndQuery,
+    event_sub_endpoint: Option<PathAndQuery>,
 }
 
 impl Service {
     pub(crate) fn from_xml(node: Node<'_, '_>) -> Result<Self> {
         #[allow(non_snake_case)]
         let (service_type, service_id, scpd_endpoint, control_endpoint, event_sub_endpoint) =
-            find_in_xml! { node => serviceType, serviceId, SCPDURL, controlURL, eventSubURL };
+            find_in_xml! { node => serviceType, serviceId, SCPDURL, controlURL, ?eventSubURL };
 
         Ok(Self {
             service_type: utils::parse_node_text(service_type)?,
             service_id: utils::parse_node_text(service_id)?,
             scpd_endpoint: utils::parse_url_endpoint(scpd_endpoint)?,
             control_endpoint: utils::parse_url_endpoint(control_endpoint)?,
-            event_sub_endpoint: utils::parse_url_endpoint(event_sub_endpoint)?,
+            event_sub_endpoint: utils::parse_optional_url_endpoint(event_sub_endpoint)?,
         })
     }
 
@@ -70,8 +70,20 @@ impl Service {
     pub(crate) fn scpd_url(&self, url: &Uri) -> Uri {
         replace_url_path(url, &self.scpd_endpoint)
     }
-    pub(crate) fn event_sub_url(&self, url: &Uri) -> Uri {
-        replace_url_path(url, &self.event_sub_endpoint)
+    pub(crate) fn event_sub_url(&self, url: &Uri) -> Option<Uri> {
+        self.event_sub_endpoint
+            .as_ref()
+            .map(|path| replace_url_path(url, path))
+    }
+
+    /// Returns whether this service provides an `eventSubURL`.
+    ///
+    /// Services without an `eventSubURL` cannot be subscribed to: subscribing to them, or
+    /// calling [`renew_subscription`](Service::renew_subscription) or
+    /// [`unsubscribe`](Service::unsubscribe) on them, fails with
+    /// [`Error::EventSubscriptionNotSupported`](crate::Error::EventSubscriptionNotSupported).
+    pub fn supports_events(&self) -> bool {
+        self.event_sub_endpoint.is_some()
     }
 
     /// Fetches the [`SCPD`](scpd/struct.SCPD.html) of this service.
@@ -181,8 +193,12 @@ impl Service {
         use bytes::Bytes;
         use http_body_util::Empty;
 
+        let event_sub_url = self
+            .event_sub_url(url)
+            .ok_or(Error::EventSubscriptionNotSupported)?;
+
         let req = Request::builder()
-            .uri(self.event_sub_url(url))
+            .uri(event_sub_url)
             .method("SUBSCRIBE")
             .header("CALLBACK", format!("<{callback}>"))
             .header("NT", "upnp:event")
@@ -254,8 +270,12 @@ impl Service {
     ///
     /// When the sid is invalid, the control point will respond with a `412 Preconditition failed`.
     pub async fn renew_subscription(&self, url: &Uri, sid: &str, timeout_secs: u32) -> Result<()> {
+        let event_sub_url = self
+            .event_sub_url(url)
+            .ok_or(Error::EventSubscriptionNotSupported)?;
+
         let req = Request::builder()
-            .uri(self.event_sub_url(url))
+            .uri(event_sub_url)
             .method("SUBSCRIBE")
             .header("SID", sid)
             .header("TIMEOUT", format!("Second-{timeout_secs}"))
@@ -276,8 +296,12 @@ impl Service {
     ///
     /// When the sid is invalid, the control point will respond with a `412 Preconditition failed`.
     pub async fn unsubscribe(&self, url: &Uri, sid: &str) -> Result<()> {
+        let event_sub_url = self
+            .event_sub_url(url)
+            .ok_or(Error::EventSubscriptionNotSupported)?;
+
         let req = Request::builder()
-            .uri(self.event_sub_url(url))
+            .uri(event_sub_url)
             .method("UNSUBSCRIBE")
             .header("SID", sid)
             .body(Empty::<Bytes>::new())
@@ -357,4 +381,86 @@ fn replace_url_path(url: &Uri, path: &PathAndQuery) -> Uri {
     let mut parts = url.clone().into_parts();
     parts.path_and_query = Some(path.clone());
     Uri::from_parts(parts).expect("infallible")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use roxmltree::Document;
+
+    const DEVICE_URL: &str = "http://192.168.1.5:1400/xml/device_description.xml";
+
+    fn service_from_xml(xml: &str) -> Result<Service, Box<dyn std::error::Error>> {
+        let doc = Document::parse(xml)?;
+        Ok(Service::from_xml(doc.root_element())?)
+    }
+
+    #[test]
+    fn service_without_event_sub_url_is_parsed() -> Result<(), Box<dyn std::error::Error>> {
+        let service = service_from_xml(
+            r#"
+            <service>
+                <serviceType>urn:schemas-upnp-org:service:RenderingControl:1</serviceType>
+                <serviceId>urn:upnp-org:serviceId:RenderingControl</serviceId>
+                <SCPDURL>/MediaRenderer/RenderingControl/Description.xml</SCPDURL>
+                <controlURL>/MediaRenderer/RenderingControl/control</controlURL>
+            </service>
+            "#,
+        )?;
+
+        assert!(!service.supports_events());
+        assert_eq!(service.event_sub_url(&Uri::from_static(DEVICE_URL)), None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn service_with_event_sub_url_is_parsed() -> Result<(), Box<dyn std::error::Error>> {
+        let service = service_from_xml(
+            r#"
+            <service>
+                <serviceType>urn:schemas-upnp-org:service:RenderingControl:1</serviceType>
+                <serviceId>urn:upnp-org:serviceId:RenderingControl</serviceId>
+                <SCPDURL>/MediaRenderer/RenderingControl/Description.xml</SCPDURL>
+                <controlURL>/MediaRenderer/RenderingControl/control</controlURL>
+                <eventSubURL>/MediaRenderer/RenderingControl/Event</eventSubURL>
+            </service>
+            "#,
+        )?;
+
+        assert!(service.supports_events());
+        assert_eq!(
+            service
+                .event_sub_url(&Uri::from_static(DEVICE_URL))
+                .map(|url| url.to_string()),
+            Some("http://192.168.1.5:1400/MediaRenderer/RenderingControl/Event".to_string())
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn service_with_relative_endpoints_is_parsed() -> Result<(), Box<dyn std::error::Error>> {
+        let service = service_from_xml(
+            r#"
+            <service>
+                <serviceType>urn:schemas-upnp-org:service:RenderingControl:1</serviceType>
+                <serviceId>urn:upnp-org:serviceId:RenderingControl</serviceId>
+                <SCPDURL>MediaRenderer/RenderingControl/Description.xml</SCPDURL>
+                <controlURL>MediaRenderer/RenderingControl/control</controlURL>
+                <eventSubURL>MediaRenderer/RenderingControl/Event</eventSubURL>
+            </service>
+            "#,
+        )?;
+
+        assert!(service.supports_events());
+        assert_eq!(
+            service
+                .control_url(&Uri::from_static(DEVICE_URL))
+                .to_string(),
+            "http://192.168.1.5:1400/MediaRenderer/RenderingControl/control"
+        );
+
+        Ok(())
+    }
 }
