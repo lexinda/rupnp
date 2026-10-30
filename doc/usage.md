@@ -553,3 +553,241 @@ rupnp = { version = "3", features = ["full_device_spec"] }       # 完整设备�
 不使用事件订阅时关掉 `subscribe` 可以少编译几个依赖。
 注意 `subscribe` 与 `full_device_spec` 不是可加的组合，
 `--no-default-features --features subscribe` 要单独测过。
+
+---
+
+# 媒体工具（`rupnp::mp4_tool`）
+
+这一组是处理本地媒体文件的辅助能力，和 UPnP 协议无关，可以单独用。
+场景说明见 [用例 7–11](use-cases.md#用例-7媒体处理分割--拼接--插入--生成空白片)。
+
+## 12. 准备 ffmpeg
+
+几乎所有媒体操作都要 ffmpeg。`ensure_ffmpeg` 负责把它准备好：
+
+```rust
+use rupnp::mp4_tool::{self, FfmpegOptions};
+
+// 默认：本机没有就下载一个
+let ffmpeg = mp4_tool::ensure_ffmpeg(&FfmpegOptions::default())?;
+
+// 指定已有的 ffmpeg，不会下载
+let ffmpeg = mp4_tool::ensure_ffmpeg(&FfmpegOptions {
+    executable: Some("/usr/local/bin/ffmpeg".into()),
+    ..FfmpegOptions::default()
+})?;
+```
+
+`FfmpegOptions`：
+
+| 字段 | 作用 |
+|---|---|
+| `executable` | 已有的 ffmpeg 路径。给了就直接用，**不下载**；不存在则报错 |
+| `url` | ffmpeg 的下载地址。为空时用 `ffmpeg-sidecar` 内置的地址 |
+| `directory` | 下载到哪个目录。为空时用 sidecar 目录 |
+
+都没指定时会**创建下载目录**再下载。下载走 Rust 的 HTTP 客户端
+（`ffmpeg-sidecar` 用的 `ureq`），**不依赖系统里有没有 `curl`**；失败会重试并打日志。
+
+国内网络直连境外源很慢（实测 gyan.dev 只有 11 KB/s），可以用镜像：
+
+```rust
+let ffmpeg = mp4_tool::ensure_ffmpeg(&FfmpegOptions {
+    url: Some(
+        "https://gh-proxy.com/https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip".into(),
+    ),
+    ..FfmpegOptions::default()
+})?;
+```
+
+## 13. 检查与修复 MP4 布局
+
+渲染器通过 HTTP Range 拉流时，如果 `moov` 在 `mdat` 之后，渲染器必须把整个文件
+下载完才能开始播。`Layout` 用来判断，`remux` 用来修：
+
+```rust
+use std::path::Path;
+use rupnp::mp4_tool;
+
+// 读顶层 atom
+let atoms = mp4_tool::top_level_atoms(Path::new("movie.mp4"))?;
+
+for atom in &atoms {
+    println!("{} @ {} ({} 字节)", atom.kind, atom.offset, atom.size);
+}
+
+// 判断布局
+match mp4_tool::layout(&atoms) {
+    mp4_tool::Layout::FastStart => println!("已经优化过了"),
+    mp4_tool::Layout::MoovAtEnd => println!("moov 在末尾，渲染器要下完整个文件"),
+    mp4_tool::Layout::Unknown => println!("不是标准 MP4"),
+}
+
+// 修复：把 moov 搬到文件头
+mp4_tool::remux(&ffmpeg, Path::new("movie.mp4"), Path::new("movie.faststart.mp4"))?;
+```
+
+`Atom` 有 `offset` / `kind` / `size` 三个字段，`Layout` 是
+`FastStart` / `MoovAtEnd` / `Unknown`。
+
+## 14. 时间格式
+
+`parse_time` 解析 ffmpeg 的时间写法，媒体相关的函数都用它：
+
+```rust
+use std::time::Duration;
+use rupnp::mp4_tool::parse_time;
+
+assert_eq!(parse_time("90"), Some(Duration::from_secs(90)));
+assert_eq!(parse_time("1:30"), Some(Duration::from_secs(90)));
+assert_eq!(parse_time("00:01:30.500"), Some(Duration::from_millis(90_500)));
+assert_eq!(parse_time("1h30m"), Some(Duration::from_secs(5400)));
+assert_eq!(parse_time("abc"), None);
+```
+
+| 写法 | 含义 |
+|---|---|
+| `90`、`1.5` | 秒 |
+| `1:30` | 分:秒 |
+| `00:01:30` | 时:分:秒 |
+| `00:01:30.500` | 带小数秒 |
+| `90s`、`2m`、`1h30m` | 带单位 |
+
+## 15. 分割 / 拼接 / 插入 / 空白片
+
+```rust
+use std::path::{Path, PathBuf};
+use rupnp::mp4_tool::{self, MediaKind};
+
+// 分割：从起点开始取一段时间
+let out = mp4_tool::split(&ffmpeg, Path::new("movie.mp4"), "00:00:30", "60")?;
+
+// 拼接：按顺序接起来
+let out = mp4_tool::concat(&ffmpeg, &[PathBuf::from("a.mp4"), PathBuf::from("b.mp4")])?;
+
+// 插入：在指定时间插入一段
+let out = mp4_tool::insert(
+    &ffmpeg,
+    Path::new("movie.mp4"),
+    Path::new("ad.mp4"),
+    "00:05:00",
+)?;
+
+// 生成黑屏视频 / 静音音频
+let out = mp4_tool::blank(&ffmpeg, MediaKind::Video, "5")?;
+let out = mp4_tool::blank(&ffmpeg, MediaKind::Audio, "5")?;
+```
+
+`concat` 和 `insert` 要求输入是**同一种容器和编码**（它们只搬运数据，不转码）。
+
+`MediaKind::from_path` 按扩展名判断类型（`.mp4` / `.mkv` → `Video`，
+`.mp3` / `.flac` → `Audio`）。
+
+## 16. 转码
+
+```rust
+use std::path::Path;
+use rupnp::mp4_tool::{self, TranscodeOptions};
+
+// 先探测格式
+let info = mp4_tool::probe(&ffmpeg, Path::new("movie.mkv"))?;
+println!("{} / {:?} / {:?}", info.format, info.video_codec, info.audio_codec);
+
+// 转码
+let outcome = mp4_tool::to_mp4(
+    &ffmpeg,
+    Path::new("movie.mkv"),
+    Path::new("movie.converted.mp4"),
+    &TranscodeOptions::default(),
+)?;
+
+println!(
+    "remuxed={} 视频重编码={} 音频重编码={}",
+    outcome.remuxed, outcome.reencoded_video, outcome.reencoded_audio
+);
+```
+
+`to_mp4` 会先探测，**能 copy 的流就不转码**：已经是 MP4 + H.264 + AAC 时只换容器，
+秒级完成。
+
+`TranscodeOptions`：
+
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `preset` | `veryfast` | x264 preset，`ultrafast` … `veryslow` |
+| `crf` | 23 | 越小画质越好体积越大 |
+| `audio_bitrate` | `128k` | 音频码率 |
+| `pixel_format` | `yuv420p` | 兼容性最好 |
+| `faststart` | `true` | moov 前置，投屏必需 |
+| `max_height` | `None` | 等比缩小到该高度以内 |
+
+预设：`TranscodeOptions::fast()`（`ultrafast` / crf 28）、
+`TranscodeOptions::high_quality()`（`slow` / crf 20 / 192k）。
+
+批量：
+
+```rust
+let results = mp4_tool::to_mp4_batch(
+    &ffmpeg,
+    &[PathBuf::from("a.avi"), PathBuf::from("b.flv")],
+    &TranscodeOptions::default(),
+);
+```
+
+`MediaInfo` 带 `format` / `video_codec` / `audio_codec` / `duration` /
+`sample_rate` / `channels`。
+
+## 17. 音频：提取 / 转换 / 拼接 / 分割
+
+```rust
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+use rupnp::mp4_tool::{self, ConcatMp3Options, FadeCurve, Mp3Options, SplitAudioOptions};
+
+// 从视频提取音轨
+let out = mp4_tool::extract_mp3(&ffmpeg, Path::new("movie.mp4"), None, &Mp3Options::default())?;
+
+// WAV 等转 MP3
+let out = mp4_tool::to_mp3(&ffmpeg, Path::new("song.wav"), None, &Mp3Options::high())?;
+
+// 拼接，带间隔和淡入淡出
+let options = ConcatMp3Options {
+    gap: Duration::from_secs(1),
+    fade: Duration::from_millis(500),
+    curve: FadeCurve::Sine,
+    ..ConcatMp3Options::default()
+};
+let out = mp4_tool::concat_mp3(
+    &ffmpeg,
+    &[PathBuf::from("a.mp3"), PathBuf::from("b.mp3")],
+    Path::new("playlist.mp3"),
+    &options,
+)?;
+
+// 截取 [开始, 结束)
+let out = mp4_tool::split_audio(
+    &ffmpeg,
+    Path::new("song.mp3"),
+    "00:00:30",
+    "00:01:30",
+    None,
+    &SplitAudioOptions::default(),
+)?;
+```
+
+`Mp3Options` 预设：
+
+| 预设 | 码率 | 采样率 | 声道 | 用途 |
+|---|---|---|---|---|
+| `default()` | 192k | 原样 | 原样 | 一般用途 |
+| `high()` | 320k | 原样 | 原样 | 接近无损 |
+| `voice()` | 64k | 44100 | 单声道 | 语音、播客 |
+
+`ConcatMp3Options` 预设：`seamless()`（无缝）、`with_gap_and_fade(gap, fade)`。
+
+`FadeCurve`：`Linear`（线性）、`Sine`（默认，听感自然）、`Exponential`。
+
+`SplitAudioOptions` 只有 `reencode`（默认 `false`，用 `-c copy` 快且无损）和 `mp3`。
+
+从视频提取时如果文件没有音轨，会在调用 ffmpeg 之前就报「里没有音轨」，
+退出码非 0 且不留半成品文件。

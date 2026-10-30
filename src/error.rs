@@ -26,6 +26,8 @@ pub enum Error {
     MissingArgument(String),
     /// The renderer did not reach the expected state in time.
     StateNotReached(String),
+    /// 媒体处理（ffmpeg）失败。
+    MediaError(Box<dyn std::error::Error + Send + Sync + 'static>),
 }
 impl Error {
     pub fn invalid_response<E: std::error::Error + Send + Sync + 'static>(err: E) -> Error {
@@ -72,6 +74,7 @@ impl fmt::Display for Error {
             Error::StateNotReached(state) => {
                 write!(f, "the renderer did not reach the state `{state}`")
             }
+            Error::MediaError(err) => write!(f, "媒体处理失败: {err}"),
         }
     }
 }
@@ -85,6 +88,8 @@ impl std::error::Error for Error {
             Error::InvalidUrl(err) => Some(err),
             Error::InvalidUtf8(err) => Some(err),
             Error::XmlError(err) => Some(err),
+            Error::InvalidResponse(err) => Some(err.as_ref()),
+            Error::MediaError(err) => Some(err.as_ref()),
             _ => None,
         }
     }
