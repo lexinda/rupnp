@@ -82,6 +82,12 @@ pub struct MediaInfo {
     pub video_codec: Option<String>,
     /// 音频编码，例如 `aac` / `mp3` / `wmav2`。
     pub audio_codec: Option<String>,
+    /// 媒体总时长。
+    pub duration: Option<std::time::Duration>,
+    /// 音频采样率，例如 `44100`。
+    pub sample_rate: Option<u32>,
+    /// 音频声道布局，例如 `mono` / `stereo` / `5.1(side)`。
+    pub channels: Option<String>,
 }
 
 impl MediaInfo {
@@ -140,6 +146,11 @@ fn parse_probe_output(text: &str) -> MediaInfo {
     for line in text.lines() {
         let line = line.trim();
 
+        if let Some(rest) = line.strip_prefix("Duration: ") {
+            info.duration = parse_duration(rest);
+            continue;
+        }
+
         if let Some(rest) = line.strip_prefix("Input #0, ") {
             // 形如 "Input #0, avi, from 'a.avi':"
             // MP4 家族会报成 "mov,mp4,m4a,3gp,3g2,mj2, from 'a.mp4':"
@@ -154,11 +165,58 @@ fn parse_probe_output(text: &str) -> MediaInfo {
                 info.video_codec = extract_codec(rest);
             } else if rest.contains("Audio:") {
                 info.audio_codec = extract_codec(rest);
+                info.sample_rate = extract_sample_rate(rest);
+                info.channels = extract_channels(rest);
             }
         }
     }
 
     info
+}
+
+/// 解析 "Duration: 00:01:30.50, start: ..." 里的时长。
+fn parse_duration(text: &str) -> Option<std::time::Duration> {
+    let value = text.split(',').next()?.trim();
+
+    let mut parts = value.split(':');
+
+    let hours: u64 = parts.next()?.parse().ok()?;
+    let minutes: u64 = parts.next()?.parse().ok()?;
+    let seconds: f64 = parts.next()?.parse().ok()?;
+
+    if !seconds.is_finite() || seconds < 0.0 {
+        return None;
+    }
+
+    Some(
+        std::time::Duration::from_secs(hours * 3600 + minutes * 60)
+            + std::time::Duration::from_secs_f64(seconds),
+    )
+}
+
+/// 从 "0:1(und): Audio: aac (LC), 44100 Hz, stereo, fltp, 128 kb/s" 里取采样率。
+fn extract_sample_rate(stream: &str) -> Option<u32> {
+    let (_, rest) = stream.split_once("Audio:")?;
+
+    rest.split_whitespace()
+        .find_map(|token| token.strip_suffix("Hz"))
+        .and_then(|rate| rate.parse().ok())
+}
+
+/// 从 "0:1(und): Audio: aac (LC), 44100 Hz, stereo, fltp, 128 kb/s" 里取声道布局。
+fn extract_channels(stream: &str) -> Option<String> {
+    let (_, rest) = stream.split_once("Audio:")?;
+
+    // 声道在采样率后面，形如 "44100 Hz, stereo, fltp"
+    let after_rate = rest.split_once("Hz,")?.1;
+
+    let layout = after_rate.split(',').map(str::trim).find(|token| {
+        matches!(*token, "mono" | "stereo" | "5.1" | "5.1(side)" | "7.1")
+            || token.starts_with("5.1(")
+            || token.starts_with("7.1(")
+    })?;
+
+    Some(layout.to_string())
 }
 
 /// 从 "0:0(und): Video: h264 (High), yuv420p, 1280x720, ..." 里取编码名。

@@ -15,9 +15,12 @@
 //! ```
 
 use anyhow::{Context, Result, bail};
-use rupnp::mp4_tool::{self, FfmpegOptions, MediaKind, Mp3Options, TranscodeOptions};
+use rupnp::mp4_tool::{
+    self, ConcatMp3Options, FadeCurve, FfmpegOptions, MediaKind, Mp3Options, TranscodeOptions,
+};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::Duration;
 
 fn main() -> ExitCode {
     match run() {
@@ -51,6 +54,7 @@ fn run() -> Result<ExitCode> {
         "convert" => convert(&options),
         "extract-mp3" => extract_mp3(&options),
         "to-mp3" => to_mp3(&options),
+        "concat-mp3" => concat_mp3(&options),
         "" | "-h" | "--help" | "help" => {
             print_help();
             Ok(ExitCode::SUCCESS)
@@ -89,6 +93,14 @@ struct Options {
     sample_rate: Option<u32>,
     /// MP3 声道数。
     channels: Option<u16>,
+    /// 拼接时段间的静音间隔（秒）。
+    gap: Option<f64>,
+    /// 拼接时每段的淡入淡出时长（秒）。
+    fade: Option<f64>,
+    /// 淡入淡出曲线。
+    curve: Option<FadeCurve>,
+    /// 拼接输出路径。
+    output: Option<PathBuf>,
 }
 
 fn parse_args(args: &[String]) -> Result<Options> {
@@ -167,6 +179,34 @@ fn parse_args(args: &[String]) -> Result<Options> {
                         .with_context(|| format!("--channels 不是数字: {value}"))?,
                 );
             }
+            "--gap" => {
+                let value = take_value(&mut index)?;
+                options.gap = Some(
+                    value
+                        .parse()
+                        .with_context(|| format!("--gap 不是数字: {value}"))?,
+                );
+            }
+            "--fade" => {
+                let value = take_value(&mut index)?;
+                options.fade = Some(
+                    value
+                        .parse()
+                        .with_context(|| format!("--fade 不是数字: {value}"))?,
+                );
+            }
+            "--curve" => {
+                let value = take_value(&mut index)?;
+                options.curve = Some(match value.as_str() {
+                    "linear" | "tri" => FadeCurve::Linear,
+                    "sine" | "qsin" => FadeCurve::Sine,
+                    "exp" | "exponential" => FadeCurve::Exponential,
+                    other => {
+                        bail!("--curve 只能是 linear / sine / exp，收到 `{other}`")
+                    }
+                });
+            }
+            "--output" | "-o" => options.output = Some(PathBuf::from(take_value(&mut index)?)),
             other => options.files.push(PathBuf::from(other)),
         }
 
@@ -194,6 +234,7 @@ mp4-tool —— MP4 / MP3 的检查、修复与常用处理
     mp4-tool convert [选项] <文件>...                     把任意格式转成 MP4
     mp4-tool extract-mp3 [选项] <视频>...                 从视频里提取音轨存成 MP3
     mp4-tool to-mp3 [选项] <音频>...                      把音频（如 WAV）转成 MP3
+    mp4-tool concat-mp3 [选项] <音频>...                   拼接 MP3，可加间隔和淡入淡出
 
 选项:
     --ffmpeg <路径>        指定已有的 ffmpeg 可执行文件，不会下载
@@ -210,6 +251,12 @@ MP3 专用选项:
     -b, --bitrate <码率>   例如 128k / 192k / 320k，默认 192k
     --sample-rate <Hz>     采样率，例如 44100
     --channels <数量>      声道数，1 或 2
+
+concat-mp3 专用选项:
+    --gap <秒>             段与段之间的静音间隔
+    --fade <秒>            每段首尾的淡入淡出时长
+    --curve <形状>         linear | sine | exp，默认 sine
+    -o, --output <路径>    输出路径，默认 <第一个输入名字>.concat.mp3
 
 时间格式:
     ffmpeg 的时长写法都支持，例如 90、1:30、00:01:30、00:01:30.500
@@ -231,6 +278,7 @@ MP3 专用选项:
     mp4-tool convert a.flv b.wmv c.mkv --quality high
     mp4-tool extract-mp3 movie.mp4
     mp4-tool to-mp3 song.wav --bitrate 320k
+    mp4-tool concat-mp3 a.mp3 b.mp3 c.mp3 --gap 1.5 --fade 0.5
 
 退出码:
     0  成功
@@ -451,6 +499,60 @@ fn to_mp3(options: &Options) -> Result<ExitCode> {
         eprintln!("{failed} 个文件失败");
         return Ok(ExitCode::FAILURE);
     }
+
+    Ok(ExitCode::SUCCESS)
+}
+
+/// 拼接 MP3，可带间隔和淡入淡出。
+fn concat_mp3(options: &Options) -> Result<ExitCode> {
+    if options.files.len() < 2 {
+        bail!("concat-mp3 至少需要两个输入文件");
+    }
+
+    let mut concat = ConcatMp3Options::default();
+
+    if let Some(gap) = options.gap {
+        concat.gap = Duration::from_secs_f64(gap);
+    }
+    if let Some(fade) = options.fade {
+        concat.fade = Duration::from_secs_f64(fade);
+    }
+    if let Some(curve) = options.curve {
+        concat.curve = curve;
+    }
+    if let Some(bitrate) = &options.bitrate {
+        concat.mp3.bitrate = bitrate.clone();
+    }
+
+    let output = options.output.clone().unwrap_or_else(|| {
+        let stem = options
+            .files
+            .first()
+            .and_then(|path| path.file_stem())
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "output".to_string());
+
+        options
+            .files
+            .first()
+            .and_then(|path| path.parent())
+            .unwrap_or_else(|| Path::new("."))
+            .join(format!("{stem}.concat.mp3"))
+    });
+
+    let ffmpeg = mp4_tool::ensure_ffmpeg(&options.ffmpeg)?;
+
+    eprintln!(
+        "拼接 {} 个文件：间隔 {:?}，淡入淡出 {:?}，曲线 {:?}",
+        options.files.len(),
+        concat.gap,
+        concat.fade,
+        concat.curve
+    );
+
+    mp4_tool::concat_mp3(&ffmpeg, &options.files, &output, &concat)?;
+
+    println!("{} 已生成", output.display());
 
     Ok(ExitCode::SUCCESS)
 }

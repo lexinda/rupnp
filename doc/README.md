@@ -114,12 +114,14 @@ cargo run --bin mp4-tool -- fix movie.mp4     # 重新封装（自动准备 ffmp
 | `convert` | 把 AVI / FLV / WMV / MOV / MKV 等转成 MP4（能 copy 就不转码） |
 | `extract-mp3` | 从视频里提取音轨存成 MP3 |
 | `to-mp3` | 把音频（WAV / FLAC / M4A …）转成 MP3 |
+| `concat-mp3` | 拼接 MP3，可加静音间隔和淡入淡出 |
 
 底层 API 在 [`../src/mp4_tool/`](../src/mp4_tool/)：
 `top_level_atoms` / `layout` / `ensure_ffmpeg` / `remux`，
 `media::split` / `media::concat` / `media::insert` / `media::blank`，
 `probe` / `to_mp4` / `to_mp4_batch` / `TranscodeOptions`，
-以及 `extract_mp3` / `to_mp3` / `to_mp3_batch` / `Mp3Options`。
+以及 `extract_mp3` / `to_mp3` / `to_mp3_batch` / `concat_mp3` /
+`Mp3Options` / `ConcatMp3Options` / `FadeCurve`。
 
 > examples 是**手工验证工具**，不会被 `cargo test` 执行，因为它们需要局域网里真实存在
 > UPnP 设备。可自动化跑的测试是 `cargo test` 覆盖的单元测试与文档测试。

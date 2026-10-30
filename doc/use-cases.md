@@ -1169,3 +1169,113 @@ let results = mp4_tool::to_mp3_batch(
 
 如果需要**无损**保存音轨，把 `--bitrate` 换成直接 `-c:a copy` 的路径（本模块目前
 只输出 MP3）。WAV 转 MP3 本身就是有损压缩，`320k` 已经接近人耳极限。
+
+---
+
+## 用例 10：MP3 拼接（间隔 + 淡入淡出）
+
+把多个音频接成一个，可以：
+
+- 在段与段之间留一段**静音间隔**（像节目单那样一段段接）
+- 每段首尾加**淡入淡出**，听感更自然
+
+```bash
+# 无缝拼接
+cargo run --bin mp4-tool -- concat-mp3 a.mp3 b.mp3 c.mp3
+
+# 每段之间静音 1.5 秒，每段首尾 0.5 秒淡入淡出
+cargo run --bin mp4-tool -- concat-mp3 a.mp3 b.mp3 c.mp3 --gap 1.5 --fade 0.5
+
+# 指定输出路径和曲线
+cargo run --bin mp4-tool -- concat-mp3 a.mp3 b.mp3 \
+  --gap 2 --fade 1 --curve linear -o playlist.mp3
+```
+
+输出默认 `<第一个输入名字>.concat.mp3`，与输入同目录。
+
+### 10.1 选项
+
+| 选项 | 说明 |
+|---|---|
+| `--gap <秒>` | 段与段之间的静音间隔。默认 0（无缝） |
+| `--fade <秒>` | 每段首尾的淡入淡出时长。默认 0（不淡） |
+| `--curve <形状>` | `linear` / `sine` / `exp`，默认 `sine` |
+| `-o, --output <路径>` | 输出路径 |
+| `-b, --bitrate <码率>` | 输出 MP3 的码率，默认 `192k` |
+
+### 10.2 三种曲线
+
+| 曲线 | ffmpeg | 听感 |
+|---|---|---|
+| `linear` | `tri` | 最平，音量线性变化 |
+| `sine`（默认） | `qsin` | 起伏自然，适合背景音乐 |
+| `exp` | `exp` | 变化剧烈，适合强调转场 |
+
+### 10.3 实现：两遍
+
+1. **每段单独处理** —— 需要淡入淡出就重编码（加 `afade` 滤镜），不需要就
+   `-c copy` 直接复制；统一采样率和声道
+2. **再拼接** —— 用 concat demuxer 把处理好的片段和间隔静音拼起来
+
+没有一趟 `filter_complex` 做完，是因为：淡出的**起点需要每段的时长**，而间隔静音的
+采样率/声道必须和音轨一致。探测出来更稳妥，代价是多一遍临时文件。
+
+中间产物放在系统临时目录，命令结束后自动删除。
+
+### 10.4 淡入淡出会被限制在片段时长的一半以内
+
+如果某段只有 1 秒，却要求 2 秒的淡入淡出，整段会变成静音。所以实际生效的淡入
+淡出时长会被压到 `min(fade, 时长/2)`。
+
+探测不到时长时（比如文件损坏）就不做淡入淡出，而不是猜一个。
+
+### 10.5 实测
+
+三段音频（3s / 2s / 4s）：
+
+```
+无缝拼接        9.07s   期望 ~9.0
+间隔1.5+淡入淡出 12.15s  期望 ~12.0
+```
+
+用 `astats` 逐点测 RMS，确认淡入淡出和间隔真的作用在音频上：
+
+```
+0.05s = -31.5dB   1.5s = -22.4dB    起始更轻 -> 淡入生效
+3.15s = -inf      1.5s = -22.4dB    间隔是纯静音
+11.95s = -36.0dB  11.0s = -22.4dB   结尾更轻 -> 淡出生效
+```
+
+### 10.6 用库
+
+```rust
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+use rupnp::mp4_tool::{self, ConcatMp3Options, FadeCurve};
+
+let ffmpeg = mp4_tool::ensure_ffmpeg(&Default::default())?;
+
+let options = ConcatMp3Options {
+    gap: Duration::from_secs(1),
+    fade: Duration::from_millis(500),
+    curve: FadeCurve::Sine,
+    ..Default::default()
+};
+
+mp4_tool::concat_mp3(
+    &ffmpeg,
+    &[PathBuf::from("a.mp3"), PathBuf::from("b.mp3")],
+    Path::new("playlist.mp3"),
+    &options,
+)?;
+```
+
+预设：
+
+```rust
+// 无缝
+ConcatMp3Options::seamless()
+
+// 带间隔和淡入淡出
+ConcatMp3Options::with_gap_and_fade(Duration::from_secs(1), Duration::from_millis(500))
+```
