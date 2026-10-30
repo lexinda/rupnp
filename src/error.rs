@@ -134,6 +134,13 @@ impl From<Utf8Error> for Error {
         Error::InvalidUtf8(err)
     }
 }
+impl From<anyhow::Error> for Error {
+    fn from(err: anyhow::Error) -> Self {
+        // anyhow::Error 不实现 std::error::Error，但可以转成 Box<dyn Error>，
+        // 转进去之后错误链仍然完整。
+        Error::MediaError(err.into())
+    }
+}
 
 #[derive(Debug)]
 pub struct UPnPError {
