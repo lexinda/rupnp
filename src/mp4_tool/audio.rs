@@ -293,6 +293,108 @@ impl ConcatMp3Options {
     }
 }
 
+/// 音频分割的选项。
+#[derive(Debug, Clone, Default)]
+pub struct SplitAudioOptions {
+    /// 重新编码以获得精确到帧的切点。
+    ///
+    /// 默认只复制（`-c copy`），速度快且对 MP3 无损。MP3 每帧都能独立解码，
+    /// 所以切点本来就是准的；换成 AAC 之类有帧间依赖的格式时可能需要重编码。
+    pub reencode: bool,
+    /// 输出的 MP3 参数（`reencode` 时用）。
+    pub mp3: Mp3Options,
+}
+
+/// 从音频里截取 `[start, end)` 这一段，存成 MP3。
+///
+/// `start` 和 `end` 用 ffmpeg 的时间格式，见 [`parse_time`](crate::mp4_tool::parse_time)：
+/// `90`、`1:30`、`00:01:30`、`00:01:30.500`、`1h30m` 都能解析。
+///
+/// `output` 为 `None` 时写到同目录的 `<名字>.split.mp3`。
+///
+/// ```no_run
+/// use std::path::Path;
+/// use rupnp::mp4_tool::audio::{self, SplitAudioOptions};
+///
+/// # fn main() -> anyhow::Result<()> {
+/// let ffmpeg = Path::new("ffmpeg");
+/// // 取第 30 秒到第 90 秒
+/// let out = audio::split_audio(
+///     ffmpeg,
+///     Path::new("song.mp3"),
+///     "00:00:30",
+///     "00:01:30",
+///     None,
+///     &SplitAudioOptions::default(),
+/// )?;
+/// println!("{}", out.display());
+/// # Ok(())
+/// # }
+/// ```
+pub fn split_audio(
+    ffmpeg: &Path,
+    input: &Path,
+    start: &str,
+    end: &str,
+    output: Option<&Path>,
+    options: &SplitAudioOptions,
+) -> Result<PathBuf> {
+    let start = crate::mp4_tool::parse_time(start)
+        .with_context(|| format!("无法解析开始时间 `{start}`"))?;
+    let end =
+        crate::mp4_tool::parse_time(end).with_context(|| format!("无法解析结束时间 `{end}`"))?;
+
+    if end <= start {
+        bail!("结束时间必须晚于开始时间（{start:?} -> {end:?}）");
+    }
+
+    let duration = end - start;
+
+    let output = match output {
+        Some(output) => output.to_path_buf(),
+        None => derived_split_path(input),
+    };
+
+    let mut command = command(ffmpeg);
+
+    // -ss 放在 -i 之前是快速定位，配合 -c copy 很快
+    command
+        .arg("-ss")
+        .arg(format!("{:.3}", start.as_secs_f64()))
+        .arg("-i")
+        .arg(input)
+        .arg("-t")
+        .arg(format!("{:.3}", duration.as_secs_f64()));
+
+    if options.reencode {
+        command
+            .arg("-c:a")
+            .arg("libmp3lame")
+            .arg("-b:a")
+            .arg(&options.mp3.bitrate);
+    } else {
+        command.arg("-c:a").arg("copy");
+    }
+
+    command.arg(&output);
+
+    run(command, "分割音频")?;
+
+    Ok(output)
+}
+
+/// 同目录下的 `<名字>.split.mp3`。
+pub fn derived_split_path(input: &Path) -> PathBuf {
+    let stem = input
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "output".to_string());
+
+    let directory = input.parent().unwrap_or_else(|| Path::new("."));
+
+    directory.join(format!("{stem}.split.mp3"))
+}
+
 /// 把多个音频拼成一个 MP3，段与段之间可以有静音间隔，每段首尾可以淡入淡出。
 ///
 /// 实现是「每段单独处理 → 再拼接」两遍：
@@ -702,5 +804,41 @@ mod tests {
             &ConcatMp3Options::default(),
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn derives_split_path_next_to_input() {
+        assert_eq!(
+            derived_split_path(Path::new("/tmp/song.mp3")),
+            Path::new("/tmp/song.split.mp3")
+        );
+    }
+
+    #[test]
+    fn split_rejects_end_before_start() {
+        let result = split_audio(
+            Path::new("definitely-not-ffmpeg"),
+            Path::new("/tmp/song.mp3"),
+            "00:01:00",
+            "00:00:30",
+            None,
+            &SplitAudioOptions::default(),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn split_rejects_invalid_times() {
+        for (start, end) in [("abc", "00:01:00"), ("00:00:30", "xyz")] {
+            let result = split_audio(
+                Path::new("definitely-not-ffmpeg"),
+                Path::new("/tmp/song.mp3"),
+                start,
+                end,
+                None,
+                &SplitAudioOptions::default(),
+            );
+            assert!(result.is_err(), "{start} -> {end} 应当被拒绝");
+        }
     }
 }

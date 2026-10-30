@@ -1279,3 +1279,81 @@ ConcatMp3Options::seamless()
 // 带间隔和淡入淡出
 ConcatMp3Options::with_gap_and_fade(Duration::from_secs(1), Duration::from_millis(500))
 ```
+
+---
+
+## 用例 11：音频分割（起止时间）
+
+截取音频的 `[开始, 结束)` 这一段，存成 MP3。
+
+```bash
+# 取第 30 秒到第 90 秒
+cargo run --bin mp4-tool -- split-audio song.mp3 --start 00:00:30 --end 00:01:30
+
+# 指定输出
+cargo run --bin mp4-tool -- split-audio song.mp3 --start 1:30 --end 2:00 -o intro.mp3
+```
+
+输出默认 `<名字>.split.mp3`，与输入同目录。
+
+### 11.1 时间格式
+
+`--start` 和 `--end` 都接受这些写法：
+
+| 写法 | 含义 |
+|---|---|
+| `90`、`1.5` | 秒 |
+| `1:30` | 分:秒 |
+| `00:01:30` | 时:分:秒 |
+| `00:01:30.500` | 带小数秒 |
+| `90s`、`2m`、`1h30m` | 带单位 |
+
+库里的 `parse_time` 也公开了，可以自己用：
+
+```rust
+use std::time::Duration;
+use rupnp::mp4_tool::parse_time;
+
+assert_eq!(parse_time("1:30"), Some(Duration::from_secs(90)));
+assert_eq!(parse_time("1h30m"), Some(Duration::from_secs(5400)));
+```
+
+### 11.2 边界检查
+
+- **结束时间必须晚于开始时间** —— 否则报错，不产出文件
+- **时间格式非法** —— 报错并说明是哪个时间解析不了
+
+```console
+$ mp4-tool split-audio song.mp3 --start 5 --end 2
+错误: 结束时间必须晚于开始时间（5s -> 2s）
+```
+
+### 11.3 复制还是重编码
+
+默认用 `-c copy` 只复制数据，快且对 MP3 无损。MP3 每帧都能独立解码，所以切点本来就是
+准的。
+
+换成 AAC 之类有帧间依赖的格式时，切点可能偏一个帧，这时加 `--reencode` 重新编码：
+
+```bash
+cargo run --bin mp4-tool -- split-audio track.m4a --start 30 --end 90 --reencode
+```
+
+### 11.4 用库
+
+```rust
+use std::path::Path;
+use rupnp::mp4_tool::{self, SplitAudioOptions};
+
+let ffmpeg = mp4_tool::ensure_ffmpeg(&Default::default())?;
+
+let out = mp4_tool::split_audio(
+    &ffmpeg,
+    Path::new("song.mp3"),
+    "00:00:30",
+    "00:01:30",
+    None,
+    &SplitAudioOptions::default(),
+)?;
+println!("{}", out.display());
+```

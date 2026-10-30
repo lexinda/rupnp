@@ -16,7 +16,8 @@
 
 use anyhow::{Context, Result, bail};
 use rupnp::mp4_tool::{
-    self, ConcatMp3Options, FadeCurve, FfmpegOptions, MediaKind, Mp3Options, TranscodeOptions,
+    self, ConcatMp3Options, FadeCurve, FfmpegOptions, MediaKind, Mp3Options, SplitAudioOptions,
+    TranscodeOptions,
 };
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -55,6 +56,7 @@ fn run() -> Result<ExitCode> {
         "extract-mp3" => extract_mp3(&options),
         "to-mp3" => to_mp3(&options),
         "concat-mp3" => concat_mp3(&options),
+        "split-audio" => split_audio(&options),
         "" | "-h" | "--help" | "help" => {
             print_help();
             Ok(ExitCode::SUCCESS)
@@ -101,6 +103,10 @@ struct Options {
     curve: Option<FadeCurve>,
     /// 拼接输出路径。
     output: Option<PathBuf>,
+    /// 分割的结束时间。
+    end: Option<String>,
+    /// 分割时重新编码（精确到帧）。
+    reencode: bool,
 }
 
 fn parse_args(args: &[String]) -> Result<Options> {
@@ -207,6 +213,8 @@ fn parse_args(args: &[String]) -> Result<Options> {
                 });
             }
             "--output" | "-o" => options.output = Some(PathBuf::from(take_value(&mut index)?)),
+            "--end" => options.end = Some(take_value(&mut index)?),
+            "--reencode" => options.reencode = true,
             other => options.files.push(PathBuf::from(other)),
         }
 
@@ -235,6 +243,8 @@ mp4-tool —— MP4 / MP3 的检查、修复与常用处理
     mp4-tool extract-mp3 [选项] <视频>...                 从视频里提取音轨存成 MP3
     mp4-tool to-mp3 [选项] <音频>...                      把音频（如 WAV）转成 MP3
     mp4-tool concat-mp3 [选项] <音频>...                   拼接 MP3，可加间隔和淡入淡出
+    mp4-tool split-audio [选项] <音频> --start <时间> --end <时间>
+                                                         截取音频的 [开始, 结束) 段
 
 选项:
     --ffmpeg <路径>        指定已有的 ffmpeg 可执行文件，不会下载
@@ -258,6 +268,15 @@ concat-mp3 专用选项:
     --curve <形状>         linear | sine | exp，默认 sine
     -o, --output <路径>    输出路径，默认 <第一个输入名字>.concat.mp3
 
+split-audio 专用选项:
+    --start <时间>         开始的时刻
+    --end <时间>           结束的时刻（不含）
+    --reencode             重新编码以精确到帧，默认只复制
+    -o, --output <路径>    输出路径，默认 <输入名字>.split.mp3
+
+时间格式:
+    90、1:30、00:01:30、00:01:30.500、1h30m 都能解析
+
 时间格式:
     ffmpeg 的时长写法都支持，例如 90、1:30、00:01:30、00:01:30.500
 
@@ -279,6 +298,7 @@ concat-mp3 专用选项:
     mp4-tool extract-mp3 movie.mp4
     mp4-tool to-mp3 song.wav --bitrate 320k
     mp4-tool concat-mp3 a.mp3 b.mp3 c.mp3 --gap 1.5 --fade 0.5
+    mp4-tool split-audio song.mp3 --start 00:00:30 --end 00:01:30
 
 退出码:
     0  成功
@@ -499,6 +519,45 @@ fn to_mp3(options: &Options) -> Result<ExitCode> {
         eprintln!("{failed} 个文件失败");
         return Ok(ExitCode::FAILURE);
     }
+
+    Ok(ExitCode::SUCCESS)
+}
+
+/// 分割音频：截取 [start, end) 这一段。
+fn split_audio(options: &Options) -> Result<ExitCode> {
+    let input = single_input(options, "split-audio")?;
+
+    let start = options
+        .start
+        .as_deref()
+        .context("split-audio 需要 --start <时间>")?;
+    let end = options
+        .end
+        .as_deref()
+        .context("split-audio 需要 --end <时间>")?;
+
+    let mut split = SplitAudioOptions {
+        reencode: options.reencode,
+        ..SplitAudioOptions::default()
+    };
+
+    if let Some(bitrate) = &options.bitrate {
+        split.mp3.bitrate = bitrate.clone();
+    }
+
+    let ffmpeg = mp4_tool::ensure_ffmpeg(&options.ffmpeg)?;
+
+    eprintln!("分割 {}：{start} 到 {end}", input.display());
+
+    let output = mp4_tool::split_audio(
+        &ffmpeg,
+        input,
+        start,
+        end,
+        options.output.as_deref(),
+        &split,
+    )?;
+    println!("{} 已生成", output.display());
 
     Ok(ExitCode::SUCCESS)
 }

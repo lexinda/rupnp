@@ -18,6 +18,7 @@ use ffmpeg_sidecar::command::FfmpegCommand;
 use ffmpeg_sidecar::event::FfmpegEvent;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 /// 转码选项。
 #[derive(Debug, Clone)]
@@ -83,7 +84,7 @@ pub struct MediaInfo {
     /// 音频编码，例如 `aac` / `mp3` / `wmav2`。
     pub audio_codec: Option<String>,
     /// 媒体总时长。
-    pub duration: Option<std::time::Duration>,
+    pub duration: Option<Duration>,
     /// 音频采样率，例如 `44100`。
     pub sample_rate: Option<u32>,
     /// 音频声道布局，例如 `mono` / `stereo` / `5.1(side)`。
@@ -139,6 +140,118 @@ pub fn probe(ffmpeg: &Path, input: &Path) -> Result<MediaInfo> {
     Ok(parse_probe_output(&text))
 }
 
+/// 解析 ffmpeg 的时间格式。
+///
+/// 支持的写法：
+///
+/// - 纯秒数：`90`、`1.5`
+/// - `MM:SS`、`HH:MM:SS`，秒可以带小数：`00:01:30.500`
+/// - 带单位：`1h30m`、`90s`、`2m`
+///
+/// ```rust
+/// use std::time::Duration;
+/// use rupnp::mp4_tool::parse_time;
+///
+/// assert_eq!(parse_time("90"), Some(Duration::from_secs(90)));
+/// assert_eq!(parse_time("1:30"), Some(Duration::from_secs(90)));
+/// assert_eq!(parse_time("00:01:30.500"), Some(Duration::from_millis(90_500)));
+/// assert_eq!(parse_time("1h30m"), Some(Duration::from_secs(5400)));
+/// ```
+pub fn parse_time(value: &str) -> Option<Duration> {
+    let value = value.trim();
+
+    if value.is_empty() {
+        return None;
+    }
+
+    if value.contains(':') {
+        return parse_colon_time(value);
+    }
+
+    if value.contains('h') || value.contains('m') || value.contains('s') {
+        return parse_unit_time(value);
+    }
+
+    let seconds: f64 = value.parse().ok()?;
+
+    if !seconds.is_finite() || seconds < 0.0 {
+        return None;
+    }
+
+    Some(Duration::from_secs_f64(seconds))
+}
+
+/// 解析 `MM:SS` / `HH:MM:SS`。
+fn parse_colon_time(value: &str) -> Option<Duration> {
+    let parts: Vec<&str> = value.split(':').collect();
+
+    if parts.is_empty() || parts.len() > 3 {
+        return None;
+    }
+
+    let numbers: Vec<f64> = parts
+        .iter()
+        .map(|part| part.trim().parse::<f64>().ok())
+        .collect::<Option<Vec<_>>>()?;
+
+    if numbers
+        .iter()
+        .any(|number| !number.is_finite() || *number < 0.0)
+    {
+        return None;
+    }
+
+    let total = match numbers.len() {
+        1 => numbers[0],
+        2 => numbers[0] * 60.0 + numbers[1],
+        3 => numbers[0] * 3600.0 + numbers[1] * 60.0 + numbers[2],
+        _ => return None,
+    };
+
+    Some(Duration::from_secs_f64(total))
+}
+
+/// 解析 `1h30m` 这种带单位的写法。
+fn parse_unit_time(value: &str) -> Option<Duration> {
+    let mut total = 0.0f64;
+    let mut number = String::new();
+    let mut found = false;
+
+    for ch in value.chars() {
+        if ch.is_ascii_digit() || ch == '.' {
+            number.push(ch);
+            continue;
+        }
+
+        if number.is_empty() {
+            return None;
+        }
+
+        let value: f64 = number.parse().ok()?;
+        number.clear();
+        found = true;
+
+        total += match ch {
+            'h' => value * 3600.0,
+            'm' => value * 60.0,
+            's' => value,
+            _ => return None,
+        };
+    }
+
+    // 结尾没有单位，当作秒
+    if !number.is_empty() {
+        total += number.parse::<f64>().ok()?;
+        found = true;
+    }
+
+    if !found || !total.is_finite() || total < 0.0 {
+        return None;
+    }
+
+    Some(Duration::from_secs_f64(total))
+}
+
 /// 从 `ffmpeg -i` 的输出里解析容器和编码。
 fn parse_probe_output(text: &str) -> MediaInfo {
     let mut info = MediaInfo::default();
@@ -175,7 +288,7 @@ fn parse_probe_output(text: &str) -> MediaInfo {
 }
 
 /// 解析 "Duration: 00:01:30.50, start: ..." 里的时长。
-fn parse_duration(text: &str) -> Option<std::time::Duration> {
+fn parse_duration(text: &str) -> Option<Duration> {
     let value = text.split(',').next()?.trim();
 
     let mut parts = value.split(':');
@@ -188,10 +301,7 @@ fn parse_duration(text: &str) -> Option<std::time::Duration> {
         return None;
     }
 
-    Some(
-        std::time::Duration::from_secs(hours * 3600 + minutes * 60)
-            + std::time::Duration::from_secs_f64(seconds),
-    )
+    Some(Duration::from_secs(hours * 3600 + minutes * 60) + Duration::from_secs_f64(seconds))
 }
 
 /// 从 "0:1(und): Audio: aac (LC), 44100 Hz, stereo, fltp, 128 kb/s" 里取采样率。
@@ -585,5 +695,41 @@ Input #0, flv, from 'a.flv':
         assert_eq!(fast.preset, "ultrafast");
         assert!(fast.crf > hq.crf);
         assert!(hq.audio_bitrate.ends_with('k'));
+    }
+
+    #[test]
+    fn parses_plain_seconds() {
+        assert_eq!(parse_time("90"), Some(Duration::from_secs(90)));
+        assert_eq!(parse_time("1.5"), Some(Duration::from_millis(1500)));
+        assert_eq!(parse_time("  30  "), Some(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn parses_colon_times() {
+        assert_eq!(parse_time("1:30"), Some(Duration::from_secs(90)));
+        assert_eq!(parse_time("00:01:30"), Some(Duration::from_secs(90)));
+        assert_eq!(
+            parse_time("00:01:30.500"),
+            Some(Duration::from_millis(90_500))
+        );
+        assert_eq!(parse_time("01:00:00"), Some(Duration::from_secs(3600)));
+    }
+
+    #[test]
+    fn parses_unit_times() {
+        assert_eq!(parse_time("90s"), Some(Duration::from_secs(90)));
+        assert_eq!(parse_time("2m"), Some(Duration::from_secs(120)));
+        assert_eq!(parse_time("1h"), Some(Duration::from_secs(3600)));
+        assert_eq!(parse_time("1h30m"), Some(Duration::from_secs(5400)));
+        assert_eq!(parse_time("1h30m10s"), Some(Duration::from_secs(5410)));
+    }
+
+    #[test]
+    fn rejects_invalid_times() {
+        assert_eq!(parse_time(""), None);
+        assert_eq!(parse_time("abc"), None);
+        assert_eq!(parse_time("-5"), None);
+        assert_eq!(parse_time("1:2:3:4"), None);
+        assert_eq!(parse_time("1:xx"), None);
     }
 }

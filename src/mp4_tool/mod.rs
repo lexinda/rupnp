@@ -23,11 +23,12 @@ pub mod transcode;
 
 pub use atom::{Atom, Layout, layout, top_level_atoms};
 pub use audio::{
-    ConcatMp3Options, FadeCurve, Mp3Options, concat_mp3, derived_mp3_path, extract_mp3, to_mp3,
-    to_mp3_batch,
+    ConcatMp3Options, FadeCurve, Mp3Options, SplitAudioOptions, concat_mp3, derived_mp3_path,
+    derived_split_path, extract_mp3, split_audio, to_mp3, to_mp3_batch,
 };
 pub use ffmpeg::{FfmpegOptions, ensure_ffmpeg, remux};
 pub use media::{MediaKind, blank, concat, insert, split};
 pub use transcode::{
-    MediaInfo, TranscodeOptions, TranscodeOutcome, converted_path, probe, to_mp4, to_mp4_batch,
+    MediaInfo, TranscodeOptions, TranscodeOutcome, converted_path, parse_time, probe, to_mp4,
+    to_mp4_batch,
 };
