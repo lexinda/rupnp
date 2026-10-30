@@ -1355,5 +1355,81 @@ let out = mp4_tool::split_audio(
     None,
     &SplitAudioOptions::default(),
 )?;
-println!("{}", out.display());
 ```
+
+---
+
+## 用例 12：统一片源投屏到多个设备
+
+把同一个媒体地址同时投给多台设备（电视 + 盒子 + 音箱）。
+
+### 12.1 为什么"统一片源"很简单
+
+媒体流**不经过本库** —— 每个渲染器自己去 HTTP 服务器拉流：
+
+```
+                    ┌──→ 渲染器 A ←──┐
+你的 HTTP 服务器 ────┼──→ 渲染器 B ←──┤  同一个 URL
+                    └──→ 渲染器 C ←──┘  各自独立发 Range 请求
+```
+
+所以「统一片源」就是给所有设备下发**同一个 URL**。控制面由 [`CastGroup`](../src/cast_group.rs)
+封装：
+
+```rust
+use rupnp::avtransport::TransportState;
+use rupnp::cast_group::CastGroup;
+use std::time::Duration;
+
+let group = CastGroup::from_devices(&devices);
+
+let outcome = group
+    .set_uri_and_play("http://192.168.1.10:8080/movie.mp4", None)
+    .await;
+
+for (name, err) in outcome.failures() {
+    eprintln!("{name} 失败: {err}");
+}
+
+// 等所有设备都播起来
+group
+    .wait_for_state(TransportState::Playing, Duration::from_secs(10))
+    .await?;
+```
+
+完整可跑的示例见 [`examples/cast_group.rs`](../examples/cast_group.rs)。
+
+### 12.2 命令是并发下发的
+
+`CastGroup` 内部用 `join_all`，所以：
+
+- 一个设备失败**不影响**其它设备继续收到命令
+- 结果按设备顺序排列，可以按位置对应回去
+- 每个设备都有独立的超时，不会互相拖
+
+### 12.3 媒体服务器必须支持并发 Range
+
+这是最容易踩的坑。实测（1MB 文件，慢速吐数据模拟真实推流）：
+
+```
+多线程服务器    3 个并发请求 2.39s
+单线程服务器    3 个并发请求 4.07s    ← 排队了
+```
+
+**Python 的 `http.server` 默认单线程**，第二个设备会一直阻塞到第一个下完。
+Rust 侧用 hyper 就是并行的，没这个问题。
+
+### 12.4 各设备进度独立
+
+设备 A seek 到 30s，设备 B 还在 0s —— 同一个 URL、不同 Range 请求，
+HTTP 服务器天然支持，不需要额外处理。
+
+### 12.5 没有组播同步
+
+DLNA 没有这个概念。各设备各自计时，起点可能差几百毫秒。
+要严格音画同步得自己做时间对齐（比如统一 seek 到同一个目标点）。
+
+### 12.6 元数据可以按设备不同
+
+`SetAVTransportURI` 的 `CurrentURIMetaData` 是每个请求一份，所以标题可以不一样，
+**但 URL 相同** —— 这正好符合「统一片源」的需求。

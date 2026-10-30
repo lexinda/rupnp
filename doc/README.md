@@ -89,6 +89,7 @@ async fn main() -> Result<(), rupnp::Error> {
 | [`dump_scpd.rs`](../examples/dump_scpd.rs) | 导出所有设备的 SCPD，便于离线分析 |
 | [`subscribe.rs`](../examples/subscribe.rs) | 订阅事件，打印状态变化 |
 | [`cast.rs`](../examples/cast.rs) | 把一个媒体地址投到 DLNA 渲染器 |
+| [`cast_group.rs`](../examples/cast_group.rs) | 把同一个媒体投到多个渲染器 |
 
 ## 工具
 

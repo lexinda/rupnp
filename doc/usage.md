@@ -791,3 +791,94 @@ let out = mp4_tool::split_audio(
 
 从视频提取时如果文件没有音轨，会在调用 ffmpeg 之前就报「里没有音轨」，
 退出码非 0 且不留半成品文件。
+
+---
+
+## 18. 多设备投屏（CastGroup）
+
+把**同一个媒体地址**投到多个设备。
+
+关键在于媒体流不经过本库：每个渲染器自己去 HTTP 服务器拉流，所以「统一片源」
+就是给所有设备下发同一个 URL。
+
+```rust
+use rupnp::avtransport::TransportState;
+use rupnp::cast_group::CastGroup;
+use std::time::Duration;
+
+// 1. 从设备列表里挑出带 AVTransport 的设备
+let group = CastGroup::from_devices(&devices);
+
+// 2. 统一下发（命令并发发给所有设备）
+let outcome = group
+    .set_uri_and_play("http://192.168.1.10:8080/movie.mp4", None)
+    .await;
+
+// 3. 一个设备失败不影响其它，逐个看结果
+for (name, err) in outcome.failures() {
+    eprintln!("{name} 失败: {err}");
+}
+println!("{} 个成功，{} 个失败", outcome.succeeded(), outcome.failed());
+
+// 4. 等所有设备都播起来
+group
+    .wait_for_state(TransportState::Playing, Duration::from_secs(10))
+    .await?;
+```
+
+### 18.1 组里的设备
+
+```rust
+let group = CastGroup::from_devices(&devices);   // 自动挑出有 AVTransport 的
+
+// 也可以手动加
+let mut group = CastGroup::new();
+if !group.add_device(&device) {
+    eprintln!("{} 没有 AVTransport 服务", device.friendly_name());
+}
+
+// 或者从已有的 Cast 组装
+let group = CastGroup::from_casts(vec![cast_a, cast_b]);
+
+group.len();          // 设备数
+group.is_empty();
+group.members();      // &[CastMember]，含设备名和 Cast
+group.casts();        // impl Iterator<Item = &Cast>
+```
+
+`CastMember` 有 `name`（设备友好名）和 `cast`。
+
+### 18.2 命令
+
+| 方法 | 作用 |
+|---|---|
+| `set_uri(uri, metadata)` | 给所有设备下发媒体地址 |
+| `set_uri_and_play(uri, metadata)` | 下发并开始播放 |
+| `play()` / `pause()` / `stop()` | 播放控制 |
+| `seek(unit, target)` | 跳转 |
+| `states()` | 查询每台设备的状态 |
+| `wait_for_state(state, timeout)` | 等所有设备到达某状态 |
+
+所有命令都是**并发**下发的，`join_all` 保证结果的顺序和设备顺序一致。
+
+### 18.3 结果
+
+`GroupOutcome` 按设备顺序给出每台设备的结果：
+
+```rust
+outcome.is_success();   // 是不是全部成功
+outcome.succeeded();    // 成功数
+outcome.failed();       // 失败数
+outcome.failures();     // 迭代 (设备名, 错误)
+outcome.into_result();  // 全部成功返回 Ok，否则把所有失败汇总成一个错误
+```
+
+### 18.4 一个容易忽略的前提
+
+**HTTP 服务器必须支持并发 Range 请求。** 每个渲染器都会自己发起 Range 请求，
+单线程的服务器会让第二个设备一直阻塞到第一个下完。用户看到的是「投上去不动」。
+
+各设备的播放进度是独立的 —— 设备 A seek 到 30s，设备 B 还在 0s，同一个 URL
+不同 Range 请求，互不干扰。
+
+DLNA 没有「组播同步」的概念，各设备各自计时，严格音画同步要自己额外做时间对齐。

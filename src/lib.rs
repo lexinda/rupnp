@@ -52,6 +52,8 @@
 pub mod action;
 /// Helpers for the UPnP AVTransport service.
 pub mod avtransport;
+/// 把同一个媒体投到多个设备。
+pub mod cast_group;
 mod client;
 mod device;
 /// Builder for DIDL-Lite metadata.
